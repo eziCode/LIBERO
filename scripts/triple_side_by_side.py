@@ -58,8 +58,8 @@ def create_triple_side_by_side(v1, v2, v3, out_path, labels):
 
 if __name__ == "__main__":
     task_ids = ["to_mix_the_contents", "nail_into_a_board", "put_it_rightside_up"]
-    base_dir = "results/videos"
-    out_dir = "results/overlayed_videos"
+    base_dir = "results/action_filtering/sweep/videos"
+    out_dir = "results/action_filtering/comparisons/overlays"
     os.makedirs(out_dir, exist_ok=True)
     
     config_labels = ["Expert", "keep_ratio=0.5", "keep_ratio=0.1"]

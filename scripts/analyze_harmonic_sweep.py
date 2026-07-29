@@ -86,7 +86,7 @@ def run_experiment(demo_file, demo_name):
                 continue
 
         # Save video
-        vid_dir = "results/videos"
+        vid_dir = "results/action_filtering/sweep/videos"
         os.makedirs(vid_dir, exist_ok=True)
         vid_name = f"{demo_name}_B{B}.mp4"
         vid_path = os.path.join(vid_dir, vid_name)

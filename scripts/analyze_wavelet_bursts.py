@@ -14,7 +14,7 @@ WAVELET_TYPE = 'db4'
 NUM_LEVELS = 5
 THRESHOLD_SIGMA = 2.0  # Threshold for energy peaks (multiplier of mean energy)
 CLUSTER_GAP = 10       # Max steps between peaks to be in the same cluster
-RESULTS_DIR = "/Users/ezraakresh/Documents/LIBERO/results/wavelet_burst_analysis"
+RESULTS_DIR = "results/wavelet_action/burst_analysis"
 
 TASKS = [
     {

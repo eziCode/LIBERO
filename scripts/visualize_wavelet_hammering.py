@@ -66,6 +66,6 @@ def generate_wavelet_dashboard(demo_file, out_dir):
 
 if __name__ == "__main__":
     demo_path = "demonstration_data_shaking_and_accel/robosuite_ln_libero_tabletop_manipulation_1776086280_428284_hammer_a_nail_into_a_board/demo.hdf5"
-    out = "/Users/ezraakresh/Documents/LIBERO/results/wavelet_analysis/graphs"
+    out = "results/wavelet_action/hammering/graphs"
     if os.path.exists(demo_path):
         generate_wavelet_dashboard(demo_path, out)

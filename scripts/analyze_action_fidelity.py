@@ -63,8 +63,8 @@ def process_full_sequence(actions, chunk_size, keep_ratio):
 
 def run_experiment(demo_file, task_name):
     print(f"\n>>> Running Spectral Analysis for Task: {task_name}")
-    os.makedirs("results/videos", exist_ok=True)
-    os.makedirs("results/plots", exist_ok=True)
+    os.makedirs("results/action_filtering/sweep/videos", exist_ok=True)
+    os.makedirs("results/action_filtering/sweep/plots", exist_ok=True)
     f = h5py.File(demo_file, "r")
     env_name = f["data"].attrs["env"]
     env_info = json.loads(f["data"].attrs["env_info"])
@@ -138,7 +138,7 @@ def run_experiment(demo_file, task_name):
             })
             
             vid_name = f"{task_name}_L{L}_P{P}.mp4"
-            vid_path = os.path.join("results/videos", vid_name)
+            vid_path = os.path.join("results/action_filtering/sweep/videos", vid_name)
             if len(video_frames) > 0:
                 imageio.mimsave(vid_path, video_frames, fps=10)
 

@@ -135,7 +135,7 @@ def analyze_hammering_impact(hdf5_path, out_dir):
     plt.close()
 
 if __name__ == "__main__":
-    out_path = "/Users/ezraakresh/Documents/LIBERO/results/motion_fidelity_analysis"
+    out_path = "results/action_filtering/motion_fidelity"
     
     mix_path = "demonstration_data_shaking_and_accel/robosuite_ln_libero_tabletop_manipulation_1776085564_317537_pick_up_a_cup_with_a_lid_on_it_and_you_shake_it_to_mix_the_contents/demo.hdf5"
     flip_path = "demonstration_data_shaking_and_accel/robosuite_ln_libero_tabletop_manipulation_1776093696_115486_pick_up_a_cup_that_has_been_flipped_over_and_you_put_it_rightside_up/demo.hdf5"

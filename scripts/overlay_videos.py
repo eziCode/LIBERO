@@ -66,8 +66,8 @@ def overlay_videos(video_path_1, video_path_2, output_path, alpha=0.5):
 if __name__ == "__main__":
     if len(sys.argv) < 3:
         # Default to the shaking task comparison for internal verification
-        v1 = "results/videos/to_mix_the_contents_LFull_P1.0.mp4"
-        v2 = "results/videos/to_mix_the_contents_LFull_P0.25.mp4"
+        v1 = "results/action_filtering/sweep/videos/to_mix_the_contents_LFull_P1.0.mp4"
+        v2 = "results/action_filtering/sweep/videos/to_mix_the_contents_LFull_P0.25.mp4"
         out = "results/shaking_fidelity_overlay.mp4"
         
         if os.path.exists(v1) and os.path.exists(v2):

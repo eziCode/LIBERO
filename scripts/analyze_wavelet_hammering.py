@@ -40,7 +40,7 @@ def check_checkpoint(env):
 
 def run_wavelet_experiment(demo_file):
     print("\n>>> Running Wavelet Depth Sweep (Post-Grasp Only): Hammering Task")
-    out_dir = "/Users/ezraakresh/Documents/LIBERO/results/wavelet_analysis_post_grasp"
+    out_dir = "results/wavelet_action/hammering_post_grasp"
     os.makedirs(f"{out_dir}/videos", exist_ok=True)
     
     f = h5py.File(demo_file, "r")

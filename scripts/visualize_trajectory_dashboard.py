@@ -112,7 +112,7 @@ if __name__ == "__main__":
         "robosuite_ln_libero_tabletop_manipulation_1776093696_115486_pick_up_a_cup_that_has_been_flipped_over_and_you_put_it_rightside_up"
     ]
     
-    out_path = "/Users/ezraakresh/Documents/LIBERO/results/using_gripper_signal_for_chunks/graphs"
+    out_path = "results/action_filtering/gripper_chunks/graphs"
     
     for t_folder in tasks:
         task_id = "_".join(t_folder.split("_")[-4:])

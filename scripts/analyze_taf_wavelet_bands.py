@@ -38,7 +38,7 @@ def parse_args() -> argparse.Namespace:
         ),
         help="LeRobot parquet containing pressure_matrix and force_torque.",
     )
-    parser.add_argument("--output", type=Path, default=Path("results/taf_wavelet_analysis"))
+    parser.add_argument("--output", type=Path, default=Path("results/taf_force_analysis/raw"))
     parser.add_argument("--wavelet", default="db4")
     parser.add_argument("--levels", type=int, default=4)
     parser.add_argument(
@@ -115,12 +115,15 @@ def swt_energy(
     signal: np.ndarray, wavelet: str, levels: int, smooth_samples: int
 ) -> tuple[np.ndarray, list[str]]:
     multiple = 2**levels
-    pad = (-len(signal)) % multiple
-    padded = np.pad(signal, (0, pad), mode="wrap") if pad else signal
+    if len(signal) % multiple:
+        raise ValueError(
+            f"SWT input length {len(signal)} is not divisible by {multiple}; "
+            "truncate the episode before calling swt_energy"
+        )
     # trim_approx returns [A_L, D_L, ..., D_1]. norm=True makes scale-energy
     # comparisons less sensitive to redundant SWT coefficient magnitudes.
-    coeffs = pywt.swt(padded, wavelet, level=levels, trim_approx=True, norm=True)
-    coeffs = [np.asarray(c[: len(signal)]) for c in coeffs]
+    coeffs = pywt.swt(signal, wavelet, level=levels, trim_approx=True, norm=True)
+    coeffs = [np.asarray(c) for c in coeffs]
     energy = np.stack(
         [uniform_filter1d(c * c, size=smooth_samples, mode="nearest") for c in coeffs],
         axis=1,
@@ -234,10 +237,20 @@ def main() -> None:
     profile_rows: list[dict[str, object]] = []
     regime_rows: list[dict[str, object]] = []
     threshold_output: dict[str, dict[str, float]] = {}
+    truncation_output: dict[str, int] = {}
     bands: list[str] | None = None
 
     for episode, episode_frame in frame.groupby("episode_index", sort=True):
         episode_frame = episode_frame.sort_values("frame_index")
+        original_length = len(episode_frame)
+        usable_length = original_length - (original_length % (2**args.levels))
+        if usable_length == 0:
+            raise ValueError(
+                f"Episode {episode} has only {original_length} frames, fewer than required "
+                f"for {args.levels} SWT levels"
+            )
+        episode_frame = episode_frame.iloc[:usable_length]
+        truncation_output[str(episode)] = original_length - usable_length
         pressure = pressure_array(episode_frame["observation.pressure_matrix"])
         wrench = vector_array(episode_frame["observation.force_torque"])
         time = episode_frame["timestamp"].to_numpy(dtype=float)
@@ -297,10 +310,17 @@ def main() -> None:
     (args.output / "pressure_thresholds.json").write_text(json.dumps(threshold_output, indent=2))
     plot_heatmaps(summary, args.output, bands)
 
+    analyzed_frames = int(
+        sum(
+            len(group) - (len(group) % (2**args.levels))
+            for _, group in frame.groupby("episode_index")
+        )
+    )
     metadata = {
         "data": str(args.data),
         "episodes": int(frame["episode_index"].nunique()),
-        "frames": int(len(frame)),
+        "frames": analyzed_frames,
+        "original_frames": int(len(frame)),
         "fps": fps,
         "wavelet": args.wavelet,
         "levels": args.levels,
@@ -311,6 +331,11 @@ def main() -> None:
         | {f"A{args.levels}": [0.0, fps / (2 ** (args.levels + 1))]},
         "energy_window_seconds": args.energy_window_seconds,
         "center_force": args.center_force,
+        "truncation": {
+            "policy": "Drop trailing real samples until episode length is divisible by 2**levels.",
+            "dropped_frames_by_episode": truncation_output,
+            "analyzed_frames": analyzed_frames,
+        },
         "regime_definition": "Per-episode pressure-map quantiles; no wrench values used.",
     }
     (args.output / "analysis_metadata.json").write_text(json.dumps(metadata, indent=2))

@@ -35,7 +35,7 @@ def check_checkpoint(env):
 
 def run_isolated_experiment(demo_file):
     print("\n>>> Running Isolated Harmonic Sweep (Physical Checkpoint): Mixing Task")
-    out_dir = "/Users/ezraakresh/Documents/LIBERO/results/isolated_shake"
+    out_dir = "results/action_filtering/isolated_shake"
     os.makedirs(f"{out_dir}/videos", exist_ok=True)
     
     f = h5py.File(demo_file, "r")

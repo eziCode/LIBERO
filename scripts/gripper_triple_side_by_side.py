@@ -49,8 +49,8 @@ def create_triple_side_by_side(v1, v2, v3, out_path, labels):
 
 if __name__ == "__main__":
     tasks = ["to_mix_the_contents", "nail_into_a_board", "put_it_rightside_up"]
-    vid_dir = "results/videos"
-    out_dir = "results/overlayed_videos"
+    vid_dir = "results/action_filtering/sweep/videos"
+    out_dir = "results/action_filtering/comparisons/overlays"
     os.makedirs(out_dir, exist_ok=True)
     
     labels = ["Expert", "Gripper-Phase (Ratio 0.5)", "Gripper-Phase (Ratio 0.1)"]

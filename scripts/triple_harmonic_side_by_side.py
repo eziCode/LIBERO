@@ -46,8 +46,8 @@ def create_triple_side_by_side(v1, v2, v3, out_path, labels):
 
 if __name__ == "__main__":
     tasks = ["to_mix_the_contents", "nail_into_a_board", "put_it_rightside_up"]
-    vid_dir = "results/videos"
-    out_dir = "/Users/ezraakresh/Documents/LIBERO/results/chunk_32_no_keep_ratio"
+    vid_dir = "results/action_filtering/sweep/videos"
+    out_dir = "results/action_filtering/chunk32_harmonic"
     os.makedirs(out_dir, exist_ok=True)
     
     labels = ["Bands=16", "Bands=10", "Bands=4"]

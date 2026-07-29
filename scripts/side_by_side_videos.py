@@ -53,10 +53,10 @@ def create_side_by_side(v1_path, v2_path, out_path, label1="Expert", label2="Com
 if __name__ == "__main__":
     if len(sys.argv) < 3:
         # Default for the Flip Cup task as requested
-        v1 = "results/videos/put_it_rightside_up_L16_P1.0.mp4"
-        v2 = "results/videos/put_it_rightside_up_L16_P0.05.mp4"
-        out = "results/overlayed_videos/put_it_rightside_up_L16_SideBySide.mp4"
-        os.makedirs("results/overlayed_videos", exist_ok=True)
+        v1 = "results/action_filtering/sweep/videos/put_it_rightside_up_L16_P1.0.mp4"
+        v2 = "results/action_filtering/sweep/videos/put_it_rightside_up_L16_P0.05.mp4"
+        out = "results/action_filtering/comparisons/overlays/put_it_rightside_up_L16_SideBySide.mp4"
+        os.makedirs("results/action_filtering/comparisons/overlays", exist_ok=True)
         create_side_by_side(v1, v2, out)
     else:
         v1, v2, out = sys.argv[1:4]

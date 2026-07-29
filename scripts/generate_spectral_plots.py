@@ -27,7 +27,7 @@ def process_full_sequence(actions, chunk_size, keep_ratio):
 
 def generate_task_plots(demo_file, task_name):
     print(f"Generating plots for: {task_name}")
-    os.makedirs("results/plots", exist_ok=True)
+    os.makedirs("results/action_filtering/sweep/plots", exist_ok=True)
     
     f = h5py.File(demo_file, "r")
     ep = "demo_1"
@@ -57,7 +57,7 @@ def generate_task_plots(demo_file, task_name):
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
         
-        plot_path = f"results/plots/{task_name}_Chunk{L}_Comparison.png"
+        plot_path = f"results/action_filtering/sweep/plots/{task_name}_Chunk{L}_Comparison.png"
         plt.savefig(plot_path)
         print(f"  Saved: {plot_path}")
         plt.close()

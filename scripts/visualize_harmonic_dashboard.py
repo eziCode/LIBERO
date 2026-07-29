@@ -71,7 +71,7 @@ if __name__ == "__main__":
         "nail_into_a_board": "robosuite_ln_libero_tabletop_manipulation_1776086280_428284_hammer_a_nail_into_a_board",
         "put_it_rightside_up": "robosuite_ln_libero_tabletop_manipulation_1776093696_115486_pick_up_a_cup_that_has_been_flipped_over_and_you_put_it_rightside_up"
     }
-    out_path = "/Users/ezraakresh/Documents/LIBERO/results/chunk_32_no_keep_ratio"
+    out_path = "results/action_filtering/chunk32_harmonic"
     
     for name, folder in tasks.items():
         h5_path = os.path.join(demo_base, folder, "demo.hdf5")

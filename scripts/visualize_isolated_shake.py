@@ -79,6 +79,6 @@ def generate_isolated_dashboard(demo_file, out_dir):
 
 if __name__ == "__main__":
     demo_path = "demonstration_data_shaking_and_accel/robosuite_ln_libero_tabletop_manipulation_1776085564_317537_pick_up_a_cup_with_a_lid_on_it_and_you_shake_it_to_mix_the_contents/demo.hdf5"
-    out = "/Users/ezraakresh/Documents/LIBERO/results/isolated_shake/graphs"
+    out = "results/action_filtering/isolated_shake/graphs"
     if os.path.exists(demo_path):
         generate_isolated_dashboard(demo_path, out)
