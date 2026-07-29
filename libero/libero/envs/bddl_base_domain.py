@@ -29,6 +29,7 @@ TASK_MAPPING = {}
 def register_problem(target_class):
     """We design the mapping to be case-INsensitive."""
     TASK_MAPPING[target_class.__name__.lower()] = target_class
+    return target_class
 
 
 import time
@@ -220,24 +221,16 @@ class BDDLBaseDomain(SingleArmEnv):
         for object_name in self.objects_dict.keys():
             if object_name in skip_object_names:
                 continue
-            object_states_dict[object_name] = ObjectState(self, object_name)
-            if (
-                self.objects_dict[object_name].category_name
-                in VISUAL_CHANGE_OBJECTS_DICT
-            ):
-                tracking_object_states_changes.append(object_states_dict[object_name])
+            state_obj = ObjectState(self, object_name)
+            object_states_dict[object_name] = state_obj
+            tracking_object_states_changes.append(state_obj)
 
         for object_name in self.fixtures_dict.keys():
             if object_name in skip_object_names:
                 continue
-            object_states_dict[object_name] = ObjectState(
-                self, object_name, is_fixture=True
-            )
-            if (
-                self.fixtures_dict[object_name].category_name
-                in VISUAL_CHANGE_OBJECTS_DICT
-            ):
-                tracking_object_states_changes.append(object_states_dict[object_name])
+            state_obj = ObjectState(self, object_name, is_fixture=True)
+            object_states_dict[object_name] = state_obj
+            tracking_object_states_changes.append(state_obj)
 
         for object_name in self.object_sites_dict.keys():
             if object_name in skip_object_names:
@@ -764,12 +757,22 @@ class BDDLBaseDomain(SingleArmEnv):
                 )
             )
             for obj_pos, obj_quat, obj in object_placements.values():
-                if obj.name not in list(self.fixtures_dict.keys()):
+                if obj.name not in list(self.fixtures_dict.keys()) and obj.joints:
                     # This is for movable object resetting
-                    self.sim.data.set_joint_qpos(
-                        obj.joints[-1],
-                        np.concatenate([np.array(obj_pos), np.array(obj_quat)]),
-                    )
+                    # Check if it's a standard free joint (7 elements)
+                    qpos_val = self.sim.data.get_joint_qpos(obj.joints[0])
+                    if len(obj.joints) == 1 and np.atleast_1d(qpos_val).size == 7:
+                        self.sim.data.set_joint_qpos(
+                            obj.joints[-1],
+                            np.concatenate([np.array(obj_pos), np.array(obj_quat)]),
+                        )
+                    else:
+                        # For custom restricted joints (e.g. sliders), move the base body directly
+                        body_id = self.sim.model.body_name2id(obj.root_body)
+                        self.sim.model.body_pos[body_id] = obj_pos
+                        self.sim.model.body_quat[body_id] = obj_quat
+                        for j in obj.joints:
+                            self.sim.data.set_joint_qpos(j, np.zeros(np.atleast_1d(self.sim.data.get_joint_qpos(j)).size))
                 else:
                     # This is for fixture resetting
                     body_id = self.sim.model.body_name2id(obj.root_body)

@@ -1,0 +1,52 @@
+{
+    "KITCHEN_SCENE10_close_the_top_drawer_of_the_cabinet": {
+        "orig_demos": 50,
+        "teleop_demos": 10,
+        "W16_action_kl": 11.705277883818141,
+        "W16_freq_kl": 0.7120511356760553,
+        "W32_action_kl": 11.730874381786824,
+        "W32_freq_kl": 0.7434259904486143,
+        "W64_action_kl": 11.644880604104888,
+        "W64_freq_kl": 1.0634460290794692
+    },
+    "LIVING_ROOM_SCENE1_pick_up_the_cream_cheese_box_and_put_it_in_the_basket": {
+        "orig_demos": 50,
+        "teleop_demos": 10,
+        "W16_action_kl": 9.586501023267823,
+        "W16_freq_kl": 0.5757877562520054,
+        "W32_action_kl": 9.700491430427059,
+        "W32_freq_kl": 0.6920990429097704,
+        "W64_action_kl": 9.600339507303852,
+        "W64_freq_kl": 0.9488609311700316
+    },
+    "LIVING_ROOM_SCENE5_put_the_yellow_and_white_mug_on_the_right_plate": {
+        "orig_demos": 50,
+        "teleop_demos": 10,
+        "W16_action_kl": 10.278108003481366,
+        "W16_freq_kl": 0.5024118553732456,
+        "W32_action_kl": 10.273420301784217,
+        "W32_freq_kl": 0.6546588788783828,
+        "W64_action_kl": 10.082388474426539,
+        "W64_freq_kl": 0.847799008965816
+    },
+    "LIVING_ROOM_SCENE6_put_the_white_mug_on_the_plate": {
+        "orig_demos": 50,
+        "teleop_demos": 10,
+        "W16_action_kl": 10.268609777996332,
+        "W16_freq_kl": 0.6347415710379749,
+        "W32_action_kl": 10.33438640280954,
+        "W32_freq_kl": 0.7157613709662588,
+        "W64_action_kl": 10.13594064543147,
+        "W64_freq_kl": 0.9251068501745673
+    },
+    "STUDY_SCENE1_pick_up_the_book_and_place_it_in_the_front_compartment_of_the_caddy": {
+        "orig_demos": 50,
+        "teleop_demos": 10,
+        "W16_action_kl": 10.992475952315958,
+        "W16_freq_kl": 0.6498984531733815,
+        "W32_action_kl": 11.014024471402932,
+        "W32_freq_kl": 0.6968464722169541,
+        "W64_action_kl": 10.951949301957288,
+        "W64_freq_kl": 0.9086497942789638
+    }
+}

@@ -1,0 +1,69 @@
+(define (problem LIBERO_Tabletop_Manipulation)
+  (:domain robosuite)
+  (:language hammer a nail into a board)
+    (:regions
+      (board_init_region
+          (:target main_table)
+          (:ranges (
+              (-0.291421356 -0.216421356 -0.008578644 0.066421356)
+            )
+          )
+          (:yaw_rotation (
+              (0.0 0.0)
+            )
+          )
+      )
+      (nail_init_region
+          (:target main_table)
+          (:ranges (
+              (0.085857864 -0.139142136 0.114142136 -0.110857864)
+            )
+          )
+          (:yaw_rotation (
+              (0.0 0.0)
+            )
+          )
+      )
+      (hammer_init_region
+          (:target main_table)
+          (:ranges (
+              (-0.35 0.22 -0.15 0.35)
+            )
+          )
+          (:yaw_rotation (
+              (1.5707963267948966 1.5707963267948966)
+            )
+          )
+      )
+    )
+
+  (:fixtures
+    main_table - table
+  )
+
+  (:objects
+    board_1 - board
+    nail_1 - nail
+    hammer_1 - hammer
+  )
+
+  (:obj_of_interest
+    board_1
+    nail_1
+    hammer_1
+  )
+
+  (:init
+    (On board_1 main_table_board_init_region)
+    (On nail_1 board_1)
+    (On hammer_1 main_table_hammer_init_region)
+  )
+
+  (:goal
+    (And (hammered nail_1))
+  )
+
+  (:checkpoint
+    (And (IsGrasped hammer_1))
+  )
+)

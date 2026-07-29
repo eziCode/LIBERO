@@ -1,0 +1,41 @@
+(define (problem LIBERO_Tabletop_Manipulation)
+  (:domain robosuite)
+  (:language pick up a cup with a lid on it and you shake it to mix the contents)
+    (:regions
+      (bottle_init_region
+          (:target main_table)
+          (:ranges (
+              (-0.1 -0.1 0.1 0.1)
+            )
+          )
+          (:yaw_rotation (
+              (0.0 0.0)
+            )
+          )
+      )
+    )
+
+  (:fixtures
+    main_table - table
+  )
+
+  (:objects
+    ketchup_1 - ketchup
+  )
+
+  (:obj_of_interest
+    ketchup_1
+  )
+
+  (:init
+    (On ketchup_1 main_table_bottle_init_region)
+  )
+
+  (:goal
+    (And (shaken ketchup_1))
+  )
+
+  (:checkpoint
+    (And (IsGrasped ketchup_1))
+  )
+)

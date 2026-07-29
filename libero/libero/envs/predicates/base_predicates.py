@@ -116,3 +116,51 @@ class TurnOn(UnaryAtomic):
 class TurnOff(UnaryAtomic):
     def __call__(self, arg):
         return arg.turn_off()
+
+
+class IsShaken(UnaryAtomic):
+    def __call__(self, arg1):
+        if hasattr(arg1, "has_been_shaken"):
+            return arg1.has_been_shaken
+        return False
+
+class IsHammered(UnaryAtomic):
+    def __call__(self, arg1):
+        if hasattr(arg1, "has_been_hammered"):
+            return arg1.has_been_hammered
+        return False
+
+class IsUpright(UnaryAtomic):
+    def __call__(self, arg1):
+        import robosuite.utils.transform_utils as T
+        quat = arg1.get_geom_state()["quat"]
+        # Convert MuJoCo (w,x,y,z) to (x,y,z,w) for robosuite utilities
+        mat = T.quat2mat(T.convert_quat(quat, to="xyzw"))
+        # Check if the local Z axis is aligned with the world Z axis (upright)
+        is_upright = mat[2, 2] > 0.95
+        
+        # Check if the cup is actually on the table (not in air or grasped)
+        # Table surface is at 0.90. Mug origin at base when upright is 0.90.
+        obj_pos = arg1.env.sim.data.body_xpos[arg1.env.obj_body_id[arg1.object_name]]
+        is_on_table = 0.89 < obj_pos[2] < 0.93
+            
+        # Diagnostic print to help tune the success condition
+        # print(f"[DEBUG] Success check: Upright={mat[2,2]:.3f} (goal > 0.95), Z={obj_pos[2]:.3f} (goal 0.89-0.93), OnTable={is_on_table}")
+        
+        return is_upright and is_on_table
+
+
+class IsGrasped(UnaryAtomic):
+    def __init__(self):
+        super().__init__()
+        self.initial_z = None
+
+    def __call__(self, arg1):
+        pos = arg1.get_geom_state()["pos"]
+        
+        # Capture the resting position on the first frame
+        if self.initial_z is None:
+            self.initial_z = pos[2]
+            
+        # The object is grasped when it has been lifted at least 5cm off its starting resting point
+        return pos[2] > (self.initial_z + 0.05)

@@ -1,0 +1,14 @@
+File                                                                   #Demos states_dim
+------------------------------------------------------------------------------------------
+KITCHEN_SCENE10_close_the_top_drawer_of_the_cabinet_demo.hdf5              50         77
+KITCHEN_SCENE8_put_the_right_moka_pot_on_the_stove_demo.hdf5               50         47
+LIVING_ROOM_SCENE1_pick_up_the_cream_cheese_box_and_put_it_in_the_basket_demo.hdf5     50         84
+LIVING_ROOM_SCENE2_pick_up_the_butter_and_put_it_in_the_basket_demo.hdf5     50        123
+LIVING_ROOM_SCENE3_pick_up_the_alphabet_soup_and_put_it_in_the_tray_demo.hdf5     50         97
+LIVING_ROOM_SCENE5_put_the_yellow_and_white_mug_on_the_right_plate_demo.hdf5     50         84
+LIVING_ROOM_SCENE6_put_the_white_mug_on_the_plate_demo.hdf5                50         71
+STUDY_SCENE1_pick_up_the_book_and_place_it_in_the_front_compartment_of_the_caddy_demo.hdf5     50         45
+STUDY_SCENE1_pick_up_the_book_and_place_it_in_the_right_compartment_of_the_caddy_demo.hdf5     50         45
+STUDY_SCENE3_pick_up_the_white_mug_and_place_it_to_the_right_of_the_caddy_demo.hdf5     50         58
+
+Unique states dims: [45, 47, 58, 71, 77, 84, 97, 123]

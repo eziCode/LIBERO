@@ -108,7 +108,7 @@ DATASET_LINKS = {
 HF_REPO_ID = "yifengzhu-hf/LIBERO-datasets"
 
 
-def download_from_huggingface(dataset_name, download_dir, check_overwrite=True):
+def download_from_huggingface(dataset_name, download_dir, check_overwrite=True, allow_patterns=None):
     """
     Download a specific LIBERO dataset from Hugging Face.
     
@@ -116,6 +116,7 @@ def download_from_huggingface(dataset_name, download_dir, check_overwrite=True):
         dataset_name (str): Name of the dataset to download (e.g., 'libero_spatial')
         download_dir (str): Directory where the dataset should be downloaded
         check_overwrite (bool): If True, will check if dataset already exists
+        allow_patterns (str or list, optional): Patterns of files to download
     """
     if not HUGGINGFACE_AVAILABLE:
         raise ImportError(
@@ -127,7 +128,11 @@ def download_from_huggingface(dataset_name, download_dir, check_overwrite=True):
     
     # Check if dataset already exists
     dataset_dir = os.path.join(download_dir, dataset_name)
-    if check_overwrite and os.path.exists(dataset_dir):
+    
+    if allow_patterns is None:
+        allow_patterns = f"{dataset_name}/*"
+    
+    if check_overwrite and os.path.exists(dataset_dir) and allow_patterns == f"{dataset_name}/*":
         user_response = input(
             f"Warning: dataset {dataset_name} already exists at {dataset_dir}. Overwrite? y/n\n"
         )
@@ -140,12 +145,12 @@ def download_from_huggingface(dataset_name, download_dir, check_overwrite=True):
         shutil.rmtree(dataset_dir)
     
     # Download the dataset
-    print(f"Downloading {dataset_name} from Hugging Face...")
+    print(f"Downloading {dataset_name} from Hugging Face with patterns: {allow_patterns}...")
     folder_path = snapshot_download(
         repo_id=HF_REPO_ID,
         repo_type="dataset",
         local_dir=download_dir,
-        allow_patterns=f"{dataset_name}/*",
+        allow_patterns=allow_patterns,
         local_dir_use_symlinks=False,  # Prevents using symlinks to cached files
         force_download=True  # Forces re-downloading files
     )
@@ -155,7 +160,7 @@ def download_from_huggingface(dataset_name, download_dir, check_overwrite=True):
     print(f"Downloaded {file_count} files for {dataset_name}")
 
 
-def libero_dataset_download(datasets="all", download_dir=None, check_overwrite=True, use_huggingface=False):
+def libero_dataset_download(datasets="all", download_dir=None, check_overwrite=True, use_huggingface=False, task_names=None):
     """Download libero datasets
 
     Args:
@@ -163,19 +168,23 @@ def libero_dataset_download(datasets="all", download_dir=None, check_overwrite=T
         download_dir (str, optional): Target location for storing datasets. Defaults to None, using the default path.
         check_overwrite (bool, optional): Check if overwriting datasets. Defaults to True.
         use_huggingface (bool, optional): Use Hugging Face instead of the original download links. Defaults to False.
+        task_names (list, optional): Specify which tasks to download. Defaults to None, downloading all tasks.
     """
     if download_dir is None:
         download_dir = get_libero_path("datasets")
     if not os.path.exists(download_dir):
         os.makedirs(download_dir)
 
-    assert datasets in [
+    valid_datasets = [
         "all",
         "libero_object",
         "libero_goal",
         "libero_spatial",
         "libero_100",
+        "libero_90",
+        "libero_10",
     ]
+    assert datasets in valid_datasets, f"Invalid dataset {datasets}. Valid choices are {valid_datasets}"
 
     datasets_to_download = [
         "libero_object",
@@ -188,13 +197,20 @@ def libero_dataset_download(datasets="all", download_dir=None, check_overwrite=T
         print(f"Downloading {dataset_name}")
         
         if use_huggingface:
+            allow_patterns = None
+            if task_names:
+                allow_patterns = [f"{dataset_name}/{task}_demo.hdf5" for task in task_names]
+            
             download_from_huggingface(
                 dataset_name=dataset_name,
                 download_dir=download_dir,
-                check_overwrite=check_overwrite
+                check_overwrite=check_overwrite,
+                allow_patterns=allow_patterns
             )
         else:
             print("Using original download links (these may expire soon)")
+            if task_names:
+                print("Warning: task_names is only supported when use_huggingface=True. Downloading entire dataset.")
             download_url(
                 DATASET_LINKS[dataset_name],
                 download_dir=download_dir,

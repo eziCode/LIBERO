@@ -11,7 +11,9 @@ import time
 from glob import glob
 from robosuite import load_controller_config
 from robosuite.wrappers import DataCollectionWrapper, VisualizationWrapper
-from robosuite.utils.input_utils import input2action
+from robosuite.devices import Keyboard
+from xbox_controller_usb import XboxControllerHID
+from xbox_controller_bluetooth import XboxControllerBluetooth
 
 
 import libero.libero.envs.bddl_utils as BDDLUtils
@@ -22,82 +24,85 @@ def collect_human_trajectory(
     env, device, arm, env_configuration, problem_info, remove_directory=[]
 ):
     """
-    Use the device (keyboard or SpaceNav 3D mouse) to collect a demonstration.
-    The rollout trajectory is saved to files in npz format.
-    Modify the DataCollectionWrapper wrapper to add new fields or change data formats.
-
-    Args:
-        env (MujocoEnv): environment to control
-        device (Device): to receive controls from the device
-        arms (str): which arm to control (eg bimanual) 'right' or 'left'
-        env_configuration (str): specified environment configuration
+    Collect a demonstration with debug logging.
     """
 
-    reset_success = False
-    while not reset_success:
+    print("[DEBUG] Resetting environment...")
+    while True:
         try:
             env.reset()
-            reset_success = True
-        except:
-            continue
+            print("[DEBUG] Environment reset successful")
+            break
+        except Exception as e:
+            print(f"[DEBUG] Reset failed: {e}")
+            pass
 
-    # ID = 2 always corresponds to agentview
     env.render()
-
-    task_completion_hold_count = (
-        -1
-    )  # counter to collect 10 timesteps after reaching goal
     device.start_control()
+    print("[DEBUG] Device control started")
 
-    # Loop until we get a reset from the input or the task completes
     saving = True
     count = 0
+    task_completion_hold_count = -1
 
     while True:
         count += 1
-        # Set active robot
-        active_robot = (
-            env.robots[0]
-            if env_configuration == "bimanual"
-            else env.robots[arm == "left"]
-        )
+        # print(f"[DEBUG] Step {count}")
 
-        # Get the newest action
-        action, grasp = input2action(
-            device=device,
-            robot=active_robot,
-            active_arm=arm,
-            env_configuration=env_configuration,
-        )
+        # Active robot instance
+        active_robot = env.robots[0] if env_configuration == "bimanual" else (env.robots[0] if arm == "right" else env.robots[1])
+        # print(f"[DEBUG] Active robot: {active_robot.name}")
 
-        # If action is none, then this a reset so we should break
-        if action is None:
-            print("Break")
+        # Get controller state
+        state_dict = device.get_controller_state()
+
+        if state_dict.get("reset", False):
             saving = False
             break
 
-        # Run environment step
+        dpos = state_dict.get("dpos", np.zeros(3))
+        drot = state_dict.get("raw_drotation", np.zeros(3))
+        grasp = state_dict.get("grasp", 0.0)
 
-        env.step(action)
+        if grasp > 0:
+            grasp = 1.0
+        else:
+            grasp = -1.0
+
+        action = np.concatenate([dpos, drot, [grasp]])
+        # print(f"[DEBUG] Computed action (dim {len(action)}): {action}")
+
+        # Step environment
+        try:
+            obs = env.step(action)
+            # print(f"[DEBUG] env.step successful. Obs keys: {list(obs[0].keys()) if isinstance(obs, tuple) else type(obs)}")
+        except AssertionError as ae:
+            print(f"[DEBUG] AssertionError in env.step: {ae}")
+        except Exception as e:
+            print(f"[DEBUG] Exception in env.step: {e}")
+
         env.render()
-        # Also break if we complete the task
+
+        # Task success detection
         if task_completion_hold_count == 0:
+            print("[DEBUG] Task completion hold count reached zero, ending trajectory")
             break
 
-        # state machine to check for having a success for 10 consecutive timesteps
-        if env._check_success():
-            if task_completion_hold_count > 0:
-                task_completion_hold_count -= 1  # latched state, decrement count
-            else:
-                task_completion_hold_count = 10  # reset count on first success timestep
+        if hasattr(env, "_check_success") and env._check_success():
+            task_completion_hold_count = (task_completion_hold_count - 1) if task_completion_hold_count > 0 else 10
+            print(f"[DEBUG] Task success detected, hold count: {task_completion_hold_count}")
         else:
-            task_completion_hold_count = -1  # null the counter if there's no success
+            task_completion_hold_count = -1
 
-    print(count)
-    # cleanup for end of data collection episodes
+    # print(f"[DEBUG] Total steps: {count}")
+
+    # Skip saving if reset
     if not saving:
         remove_directory.append(env.ep_directory.split("/")[-1])
+        print(f"[DEBUG] Episode skipped, remove_directory: {remove_directory}")
+
     env.close()
+    print("[DEBUG] Environment closed")
     return saving
 
 
@@ -194,90 +199,53 @@ def gather_demonstrations_as_hdf5(
 
 
 if __name__ == "__main__":
-    # Arguments
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--directory",
-        type=str,
-        default="demonstration_data",
-    )
-    parser.add_argument(
-        "--robots",
-        nargs="+",
-        type=str,
-        default="Panda",
-        help="Which robot(s) to use in the env",
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        default="single-arm-opposed",
-        help="Specified environment configuration if necessary",
-    )
-    parser.add_argument(
-        "--arm",
-        type=str,
-        default="right",
-        help="Which arm to control (eg bimanual) 'right' or 'left'",
-    )
-    parser.add_argument(
-        "--camera",
-        type=str,
-        default="agentview",
-        help="Which camera to use for collecting demos",
-    )
-    parser.add_argument(
-        "--controller",
-        type=str,
-        default="OSC_POSE",
-        help="Choice of controller. Can be 'IK_POSE' or 'OSC_POSE'",
-    )
-    parser.add_argument("--device", type=str, default="spacemouse")
-    parser.add_argument(
-        "--pos-sensitivity",
-        type=float,
-        default=1.5,
-        help="How much to scale position user inputs",
-    )
-    parser.add_argument(
-        "--rot-sensitivity",
-        type=float,
-        default=1.0,
-        help="How much to scale rotation user inputs",
-    )
-    parser.add_argument(
-        "--num-demonstration",
-        type=int,
-        default=50,
-        help="How much to scale rotation user inputs",
-    )
-    parser.add_argument("--bddl-file", type=str)
+    
+    # Required
+    parser.add_argument("--bddl-file", type=str, required=True)
 
+    # Optional arguments with defaults
+    parser.add_argument("--device", type=str, default="spacemouse")
+    parser.add_argument("--num-demonstration", type=int, default=1)
+    parser.add_argument("--directory", type=str, default="demonstration_data")
+    parser.add_argument("--robots", nargs="+", type=str, default=["Panda"])
+    parser.add_argument("--config", type=str, default="single-arm-opposed")
+    parser.add_argument("--arm", type=str, default="right")
+    parser.add_argument("--camera", type=str, default="agentview")
+    parser.add_argument("--controller", type=str, default="OSC_POSE")
+    parser.add_argument("--pos-sensitivity", type=float, default=100.5)
+    parser.add_argument("--rot-sensitivity", type=float, default=50.0)
     parser.add_argument("--vendor-id", type=int, default=9583)
     parser.add_argument("--product-id", type=int, default=50734)
 
     args = parser.parse_args()
 
-    # Get controller config
-    controller_config = load_controller_config(default_controller=args.controller)
-
-    # Create argument configuration
-    config = {
-        "robots": args.robots,
-        "controller_configs": controller_config,
-    }
-
-    assert os.path.exists(args.bddl_file)
+    # 2. Load problem info
+    assert os.path.exists(args.bddl_file), f"BDD file not found: {args.bddl_file}"
     problem_info = BDDLUtils.get_problem_info(args.bddl_file)
-    # Check if we're using a multi-armed environment and use env_configuration argument if so
-
-    # Create environment
     problem_name = problem_info["problem_name"]
     domain_name = problem_info["domain_name"]
     language_instruction = problem_info["language_instruction"]
+
+    print(f"Using controller: {args.controller}")
+    # 3. Get controller config
+    controller_config = load_controller_config(default_controller=args.controller)
+
+    # 4. Set up environment config
+    config = {"controller_configs": controller_config}
+    robots_list = args.robots if isinstance(args.robots, list) else [args.robots]
+
+    # enforce single robot for single-arm tasks
+    if "TwoArm" not in problem_name and len(robots_list) > 1:
+        print(f"Warning: Multi-robot input detected. Using only the first robot: {robots_list[0]}")
+        robots_list = [robots_list[0]]
+
+    config["robots"] = robots_list
+
     if "TwoArm" in problem_name:
         config["env_configuration"] = args.config
-    print(language_instruction)
+
+    # 5. Create environment
     env = TASK_MAPPING[problem_name](
         bddl_file_name=args.bddl_file,
         **config,
@@ -290,19 +258,15 @@ if __name__ == "__main__":
         control_freq=20,
     )
 
-    # Wrap this with visualization wrapper
+    # 6. Wrap environment
     env = VisualizationWrapper(env)
-
-    # Grab reference to controller config and convert it to json-encoded string
     env_info = json.dumps(config)
 
-    # wrap the environment with data collection wrapper
     tmp_directory = "demonstration_data/tmp/{}_ln_{}/{}".format(
         problem_name,
         language_instruction.replace(" ", "_").strip('""'),
         str(time.time()).replace(".", "_"),
     )
-
     env = DataCollectionWrapper(env, tmp_directory)
 
     # initialize device
@@ -310,11 +274,13 @@ if __name__ == "__main__":
         from robosuite.devices import Keyboard
 
         device = Keyboard(
-            pos_sensitivity=args.pos_sensitivity, rot_sensitivity=args.rot_sensitivity
+            pos_sensitivity=args.pos_sensitivity, 
+            rot_sensitivity=args.rot_sensitivity
         )
-        env.viewer.add_keypress_callback("any", device.on_press)
-        env.viewer.add_keyup_callback("any", device.on_release)
-        env.viewer.add_keyrepeat_callback("any", device.on_press)
+
+        # Only add the keypress callback (new API)
+        env.viewer.add_keypress_callback(device.on_press)
+
     elif args.device == "spacemouse":
         from robosuite.devices import SpaceMouse
 
@@ -324,9 +290,21 @@ if __name__ == "__main__":
             pos_sensitivity=args.pos_sensitivity,
             rot_sensitivity=args.rot_sensitivity,
         )
+    elif args.device == "xbox":
+        device = XboxControllerHID(
+            pos_sensitivity=args.pos_sensitivity,
+            rot_sensitivity=args.rot_sensitivity,
+        )
+    elif args.device == "xbox_bt":
+        device = XboxControllerBluetooth(
+            pos_sensitivity=args.pos_sensitivity,
+            rot_sensitivity=args.rot_sensitivity,
+            vendor_id=args.vendor_id if args.vendor_id != 9583 else 1118,
+            product_id=args.product_id if args.product_id != 50734 else 2835,
+        )
     else:
         raise Exception(
-            "Invalid device choice: choose either 'keyboard' or 'spacemouse'."
+            "Invalid device choice: choose 'keyboard', 'spacemouse', 'xbox', or 'xbox_bt'."
         )
 
     # make a new timestamped directory

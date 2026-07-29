@@ -1,0 +1,37 @@
+(define (problem LIBERO_Tabletop_Manipulation)
+  (:domain robosuite)
+  (:language pick up a cup that has been flipped over and you put it rightside up)
+    (:regions
+      (mug_init_region
+          (:target main_table)
+          (:ranges (
+              (-0.35 -0.1 -0.15 0.1)
+            )
+          )
+          (:yaw_rotation (
+              (0.0 0.0)
+            )
+          )
+      )
+    )
+
+  (:fixtures
+    main_table - table
+  )
+
+  (:objects
+    flipped_mug_1 - flipped_mug
+  )
+
+  (:obj_of_interest
+    flipped_mug_1
+  )
+
+  (:init
+    (On flipped_mug_1 main_table_mug_init_region)
+  )
+
+  (:goal
+    (And (upright flipped_mug_1))
+  )
+)

@@ -4,9 +4,11 @@ from pathlib import Path
 import h5py
 import numpy as np
 import json
+import mujoco
 import robosuite
 import robosuite.utils.transform_utils as T
 import robosuite.macros as macros
+from robosuite.utils.errors import RandomizationError
 
 import init_path
 import libero.libero.utils.utils as libero_utils
@@ -16,6 +18,30 @@ from robosuite.utils import camera_utils
 
 from libero.libero.envs import *
 from libero.libero import get_libero_path
+
+def get_left_right_gripper_contact_force(sim, robot):
+    left_force = 0.0
+    right_force = 0.0
+    try:
+        geoms = robot.gripper.contact_geoms
+        left_geom_ids = [sim.model.geom_name2id(g) for g in geoms if 'finger1' in g]
+        right_geom_ids = [sim.model.geom_name2id(g) for g in geoms if 'finger2' in g]
+    except Exception:
+        return 0.0, 0.0
+    
+    for i in range(sim.data.ncon):
+        contact = sim.data.contact[i]
+        c_array = np.zeros(6, dtype=np.float64)
+        
+        if contact.geom1 in left_geom_ids or contact.geom2 in left_geom_ids:
+            mujoco.mj_contactForce(sim.model._model, sim.data._data, i, c_array)
+            left_force += abs(c_array[0])
+            
+        if contact.geom1 in right_geom_ids or contact.geom2 in right_geom_ids:
+            mujoco.mj_contactForce(sim.model._model, sim.data._data, i, c_array)
+            right_force += abs(c_array[0])
+            
+    return left_force, right_force
 
 def main():
     parser = argparse.ArgumentParser()
@@ -65,9 +91,9 @@ def main():
     bddl_file_name = f["data"].attrs["bddl_file_name"]
 
     bddl_file_dir = os.path.dirname(bddl_file_name)
-    replace_bddl_prefix = "/".join(bddl_file_dir.split("bddl_files/")[:-1] + "bddl_files")
+    replace_bddl_prefix = "/".join(bddl_file_dir.split("bddl_files/")[:-1] + ["bddl_files"])
 
-    hdf5_path = os.path.join(get_libero_path("datasets"), bddl_file_dir.split("bddl_files/")[-1].replace(".bddl", "_demo.hdf5"))
+    hdf5_path = os.path.join(get_libero_path("datasets"), bddl_file_name.split("bddl_files/")[-1].replace(".bddl", "_demo.hdf5"))
 
     output_parent_dir = Path(hdf5_path).parent
     output_parent_dir.mkdir(parents=True, exist_ok=True)
@@ -103,9 +129,22 @@ def main():
     grp.attrs["bddl_file_content"] = open(bddl_file_name, "r").read()
     print(grp.attrs["bddl_file_content"])
 
-    env = TASK_MAPPING[problem_name](
-        **env_kwargs,
-    )
+    env = None
+    max_env_retries = 10
+    for attempt in range(1, max_env_retries + 1):
+        try:
+            env = TASK_MAPPING[problem_name](**env_kwargs)
+            break
+        except RandomizationError as e:
+            print(
+                f"[warning] environment creation failed on attempt {attempt}/{max_env_retries}: {e}. Retrying..."
+            )
+    if env is None:
+        raise RuntimeError(
+            f"Failed to create environment {problem_name} after {max_env_retries} attempts"
+        )
+
+    # Note: We will extract force/torque directly from the robot object instead of the observable system.
 
     env_args = {
         "type": 1,
@@ -123,9 +162,8 @@ def main():
     cap_index = 5
 
     for (i, ep) in enumerate(demos):
-        print("Playing back random episode... (press ESC to quit)")
+        print(f"Processing episode {i+1}/{len(demos)}: {ep}...")
 
-        # # select an episode randomly
         # read the model xml, using the metadata stored in the attribute for this episode
         model_xml = f["data/{}".format(ep)].attrs["model_file"]
         reset_success = False
@@ -158,6 +196,10 @@ def main():
         gripper_states = []
         joint_states = []
         robot_states = []
+        ee_forces = []
+        ee_torques = []
+        left_gripper_forces = []
+        right_gripper_forces = []
 
         agentview_images = []
         eye_in_hand_images = []
@@ -208,6 +250,15 @@ def main():
                         )
                     )
                 )
+                
+                target_env_for_robot = env.env if hasattr(env, "env") else env
+                if hasattr(target_env_for_robot, "robots") and len(target_env_for_robot.robots) > 0:
+                    robot = target_env_for_robot.robots[0]
+                    ee_forces.append(robot.ee_force)
+                    ee_torques.append(robot.ee_torque)
+                    lf, rf = get_left_right_gripper_contact_force(env.sim, robot)
+                    left_gripper_forces.append(np.array([lf]))
+                    right_gripper_forces.append(np.array([rf]))
 
             robot_states.append(env.get_robot_state_vector(obs))
 
@@ -244,6 +295,14 @@ def main():
             obs_grp.create_dataset("ee_states", data=np.stack(ee_states, axis=0))
             obs_grp.create_dataset("ee_pos", data=np.stack(ee_states, axis=0)[:, :3])
             obs_grp.create_dataset("ee_ori", data=np.stack(ee_states, axis=0)[:, 3:])
+            if len(ee_forces) > 0:
+                obs_grp.create_dataset("ee_force", data=np.stack(ee_forces, axis=0))
+            if len(ee_torques) > 0:
+                obs_grp.create_dataset("ee_torque", data=np.stack(ee_torques, axis=0))
+            if len(left_gripper_forces) > 0:
+                obs_grp.create_dataset("left_gripper_force", data=np.stack(left_gripper_forces, axis=0))
+            if len(right_gripper_forces) > 0:
+                obs_grp.create_dataset("right_gripper_force", data=np.stack(right_gripper_forces, axis=0))
 
         obs_grp.create_dataset("agentview_rgb", data=np.stack(agentview_images, axis=0))
         obs_grp.create_dataset(

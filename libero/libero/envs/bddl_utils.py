@@ -94,6 +94,7 @@ def robosuite_parse_problem(problem_filename):
         obj_of_interest = []
         initial_state = []
         goal_state = []
+        checkpoint_state = []
         fixtures = {}
         regions = {}
         scene_properties = {}
@@ -153,6 +154,8 @@ def robosuite_parse_problem(problem_filename):
                 initial_state = group
             elif t == ":goal":
                 package_predicates(group[1], goal_state, "", "goals")
+            elif t == ":checkpoint":
+                package_predicates(group[1], checkpoint_state, "", "checkpoints")
             else:
                 print("%s is not recognized in problem" % t)
         return {
@@ -163,6 +166,7 @@ def robosuite_parse_problem(problem_filename):
             "scene_properties": scene_properties,
             "initial_state": initial_state,
             "goal_state": goal_state,
+            "checkpoint_state": checkpoint_state,
             "language_instruction": language_instruction,
             "obj_of_interest": obj_of_interest,
         }

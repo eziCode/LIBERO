@@ -16,3 +16,9 @@ logs/
 *.mp4
 libero.egg-info/
 .vscode/
+robosuite_env/
+custom_tasks/
+custom_tasks_backups/
+datasets/
+demonstration_data/
+mimicgen_examples/

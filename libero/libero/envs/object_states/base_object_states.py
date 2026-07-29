@@ -43,6 +43,15 @@ class ObjectState(BaseObjectState):
         self.has_turnon_affordance = hasattr(
             self.env.get_object(self.object_name), "turn_on"
         )
+        
+        # New custom movement tracking
+        self.has_been_shaken = False
+        self.has_been_hammered = False
+        self.prev_geom_pos = None
+        self.shake_direction_changes = 0
+        self.last_shake_diff = None
+        self.hammer_impacts = 0
+        self.was_in_contact_with_hammer = False
 
     def get_geom_state(self):
         object_pos = self.env.sim.data.body_xpos[self.env.obj_body_id[self.object_name]]
@@ -132,6 +141,69 @@ class ObjectState(BaseObjectState):
     def update_state(self):
         if self.has_turnon_affordance:
             self.turn_on()
+
+        # Motion tracking
+        current_pos = self.env.sim.data.body_xpos[self.env.obj_body_id[self.object_name]].copy()
+        
+        if self.prev_geom_pos is not None:
+            diff = current_pos - self.prev_geom_pos
+            dist = np.linalg.norm(diff)
+            if dist > 0.005: 
+                if self.last_shake_diff is not None:
+                    cosine = np.dot(diff, self.last_shake_diff) / (dist * np.linalg.norm(self.last_shake_diff) + 1e-6)
+                    if cosine < -0.2: # Moved back in opposite direction
+                        self.shake_direction_changes += 1
+                self.last_shake_diff = diff
+            
+            if self.shake_direction_changes >= 4:
+                self.has_been_shaken = True
+                
+            # Hammer tracking: contact edge detection instead of strict velocity
+            if "nail" in self.object_name:
+                contact_now = False
+                try:
+                    hammer_name = "hammer_1"
+                    if hammer_name in self.env.objects_dict:
+                        o1 = self.env.get_object(self.object_name)
+                        o2 = self.env.get_object(hammer_name)
+                        
+                        hammer_face_geoms = [g for g in o2.contact_geoms if "face" in g.lower()]
+                        nail_geoms = o1.contact_geoms
+                        
+                        for i in range(self.env.sim.data.ncon):
+                            contact = self.env.sim.data.contact[i]
+                            c1_name = self.env.sim.model.geom_id2name(contact.geom1)
+                            c2_name = self.env.sim.model.geom_id2name(contact.geom2)
+                            
+                            c1_is_nail = c1_name in nail_geoms
+                            c2_is_face = c2_name in hammer_face_geoms
+                            c2_is_nail = c2_name in nail_geoms
+                            c1_is_face = c1_name in hammer_face_geoms
+                            
+                            if (c1_is_nail and c2_is_face) or (c2_is_nail and c1_is_face):
+                                nail_pos = self.env.sim.data.body_xpos[self.env.obj_body_id[self.object_name]]
+                                
+                                # contact.frame is a 9-element array where the first 3 elements are the normal vector.
+                                # A collision on the top face will have a vertical normal (Z ~ 1 or -1).
+                                # A collision on the side will have a horizontal normal (Z ~ 0).
+                                normal_z = abs(contact.frame[2])
+                                
+                                if contact.pos[2] > nail_pos[2] + 0.015 and normal_z > 0.8:
+                                    contact_now = True
+                                    break
+                except Exception:
+                    pass
+                
+                if contact_now and not self.was_in_contact_with_hammer:
+                    self.hammer_impacts += 1
+                
+                self.was_in_contact_with_hammer = contact_now
+                
+                # Tapping the nail once is considered hammering
+                if self.hammer_impacts >= 1:
+                    self.has_been_hammered = True
+
+        self.prev_geom_pos = current_pos
 
 
 class SiteObjectState(BaseObjectState):

@@ -1,0 +1,64 @@
+import cv2
+import numpy as np
+import os
+
+def create_triple_side_by_side(v1, v2, v3, out_path, labels):
+    cap1 = cv2.VideoCapture(v1)
+    cap2 = cv2.VideoCapture(v2)
+    cap3 = cv2.VideoCapture(v3)
+    
+    w = int(cap1.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap1.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap1.get(cv2.CAP_PROP_FPS)
+    
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(out_path, fourcc, fps, (w * 3, h))
+    
+    print(f"Generating Triple View: {out_path}")
+    
+    while True:
+        ret1, f1 = cap1.read()
+        ret2, f2 = cap2.read()
+        ret3, f3 = cap3.read()
+        
+        if not ret1 and not ret2 and not ret3:
+            break
+            
+        def pad(ret, f):
+            if not ret: return np.zeros((h, w, 3), dtype=np.uint8)
+            return cv2.resize(f, (w, h)) if (f.shape[1], f.shape[0]) != (w, h) else f
+
+        f1, f2, f3 = pad(ret1, f1), pad(ret2, f2), pad(ret3, f3)
+        combined = np.hstack((f1, f2, f3))
+        
+        # Labels
+        cv2.rectangle(combined, (0, 0), (w*3, 60), (0,0,0), -1)
+        colors = [(255, 255, 255), (0, 255, 0), (0, 165, 255)]
+        for i, label in enumerate(labels):
+            cv2.putText(combined, label, (i*w + 40, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.2, colors[i], 3)
+        
+        out.write(combined)
+        
+    cap1.release()
+    cap2.release()
+    cap3.release()
+    out.release()
+
+if __name__ == "__main__":
+    tasks = ["to_mix_the_contents", "nail_into_a_board", "put_it_rightside_up"]
+    vid_dir = "results/videos"
+    out_dir = "/Users/ezraakresh/Documents/LIBERO/results/chunk_32_no_keep_ratio"
+    os.makedirs(out_dir, exist_ok=True)
+    
+    labels = ["Bands=16", "Bands=10", "Bands=4"]
+    
+    for tid in tasks:
+        v1 = f"{vid_dir}/{tid}_B16.mp4"
+        v2 = f"{vid_dir}/{tid}_B10.mp4"
+        v3 = f"{vid_dir}/{tid}_B4.mp4"
+        out = f"{out_dir}/{tid}_TripleHarmonicView.mp4"
+        
+        if os.path.exists(v1) and os.path.exists(v2) and os.path.exists(v3):
+            create_triple_side_by_side(v1, v2, v3, out, labels)
+        else:
+            print(f"Skipping {tid}: missing files ({os.path.exists(v1)}, {os.path.exists(v2)}, {os.path.exists(v3)})")
