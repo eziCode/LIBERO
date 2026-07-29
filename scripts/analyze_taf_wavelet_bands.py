@@ -20,6 +20,7 @@ from scipy.ndimage import uniform_filter1d
 
 CHANNELS = ("Fx", "Fy", "Fz", "Tx", "Ty", "Tz")
 REGIMES = ("low_load", "steady_load", "loading", "unloading", "spatial_change")
+EVENTS = ("loading", "unloading", "spatial_change")
 
 
 def parse_args() -> argparse.Namespace:
@@ -53,6 +54,18 @@ def parse_args() -> argparse.Namespace:
         help="Subtract each episode/channel median before decomposition.",
     )
     parser.add_argument("--bootstrap", type=int, default=1000)
+    parser.add_argument(
+        "--event-window-seconds",
+        type=float,
+        default=2.0,
+        help="Seconds retained before and after each pressure-defined event onset.",
+    )
+    parser.add_argument(
+        "--event-refractory-seconds",
+        type=float,
+        default=1.0,
+        help="Minimum separation between event onsets of the same type.",
+    )
     parser.add_argument("--seed", type=int, default=7)
     return parser.parse_args()
 
@@ -155,6 +168,52 @@ def bootstrap_profiles(
     return pd.DataFrame(rows)
 
 
+def event_onsets(
+    labels: np.ndarray, event: str, radius: int, refractory: int
+) -> np.ndarray:
+    mask = labels == event
+    candidates = np.flatnonzero(mask & ~np.r_[False, mask[:-1]])
+    candidates = candidates[(candidates >= radius) & (candidates < len(labels) - radius)]
+    kept: list[int] = []
+    for candidate in candidates:
+        if not kept or candidate - kept[-1] >= refractory:
+            kept.append(int(candidate))
+    return np.asarray(kept, dtype=int)
+
+
+def bootstrap_event_series(
+    episode_series: pd.DataFrame, iterations: int, seed: int
+) -> pd.DataFrame:
+    rng = np.random.default_rng(seed)
+    rows: list[dict[str, object]] = []
+    for keys, group in episode_series.groupby(["event", "channel", "band"], sort=False):
+        table = group.pivot(index="episode", columns="relative_sample", values="value").sort_index(axis=1)
+        values = table.to_numpy()
+        if not len(values):
+            continue
+        sample_indices = rng.integers(0, len(values), size=(iterations, len(values)))
+        draws = values[sample_indices].mean(axis=1)
+        mean = values.mean(axis=0)
+        low, high = np.quantile(draws, [0.025, 0.975], axis=0)
+        event, channel, band = keys
+        event_count = int(group.groupby("episode")["event_count"].first().sum())
+        for column, mean_value, low_value, high_value in zip(table.columns, mean, low, high):
+            rows.append(
+                {
+                    "event": event,
+                    "channel": channel,
+                    "band": band,
+                    "relative_sample": int(column),
+                    "episodes": len(values),
+                    "events": event_count,
+                    "mean": float(mean_value),
+                    "ci_low": float(low_value),
+                    "ci_high": float(high_value),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
 def plot_episode(
     output: Path,
     episode: int,
@@ -223,6 +282,60 @@ def plot_heatmaps(summary: pd.DataFrame, output: Path, bands: list[str]) -> None
         plt.close(fig)
 
 
+def plot_detail_heatmaps(summary: pd.DataFrame, output: Path, detail_bands: list[str]) -> None:
+    for channel in CHANNELS:
+        table = (
+            summary[summary["channel"] == channel]
+            .pivot(index="regime", columns="band", values="mean_energy_fraction")
+            .reindex(index=REGIMES, columns=detail_bands)
+        )
+        fig, ax = plt.subplots(figsize=(6.5, 4.2))
+        image = ax.imshow(table.to_numpy(), aspect="auto", vmin=0, vmax=1, cmap="viridis")
+        ax.set_xticks(range(len(detail_bands)), detail_bands)
+        ax.set_yticks(range(len(REGIMES)), REGIMES)
+        for y in range(len(REGIMES)):
+            for x in range(len(detail_bands)):
+                value = table.iloc[y, x]
+                if np.isfinite(value):
+                    ax.text(x, y, f"{value:.2f}", ha="center", va="center", color="white", fontsize=8)
+        ax.set_title(f"{channel}: distribution within detail bands")
+        fig.colorbar(image, ax=ax, label="Fraction of D1-D4 energy")
+        fig.tight_layout()
+        fig.savefig(output / f"detail_only_heatmap_{channel}.png", dpi=160)
+        plt.close(fig)
+
+
+def plot_event_series(summary: pd.DataFrame, output: Path, fps: float, detail_bands: list[str]) -> None:
+    colors = dict(zip(detail_bands, ("#3b4cc0", "#2fb47c", "#fdae61", "#d7191c")))
+    for channel in CHANNELS:
+        fig, axes = plt.subplots(len(EVENTS), 2, figsize=(13, 10), sharex=True)
+        for row, event in enumerate(EVENTS):
+            subset = summary[(summary["channel"] == channel) & (summary["event"] == event)]
+            for band in detail_bands:
+                curve = subset[subset["band"] == band].sort_values("relative_sample")
+                x = curve["relative_sample"].to_numpy() / fps
+                axes[row, 0].plot(x, curve["mean"], label=band, color=colors[band], lw=1.4)
+                axes[row, 0].fill_between(x, curve["ci_low"], curve["ci_high"], color=colors[band], alpha=0.12)
+            total = subset[subset["band"] == "ALL_DETAILS"].sort_values("relative_sample")
+            x = total["relative_sample"].to_numpy() / fps
+            axes[row, 1].plot(x, total["mean"], color="black", lw=1.5)
+            axes[row, 1].fill_between(x, total["ci_low"], total["ci_high"], color="gray", alpha=0.2)
+            for ax in axes[row]:
+                ax.axvline(0, color="#cc3333", ls="--", lw=1)
+                ax.grid(alpha=0.2)
+                ax.set_ylim(0, 1)
+            axes[row, 0].set_ylabel(event)
+            axes[row, 0].set_title("Distribution within D1-D4")
+            axes[row, 1].set_title("All detail energy / total energy")
+        axes[0, 0].legend(ncol=len(detail_bands), fontsize=8)
+        axes[-1, 0].set_xlabel("Seconds from pressure-defined event onset")
+        axes[-1, 1].set_xlabel("Seconds from pressure-defined event onset")
+        fig.suptitle(f"{channel}: event-centered wavelet detail energy")
+        fig.tight_layout()
+        fig.savefig(output / f"event_centered_{channel}.png", dpi=160)
+        plt.close(fig)
+
+
 def main() -> None:
     args = parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
@@ -235,10 +348,15 @@ def main() -> None:
     fps = float(1.0 / np.median(np.diff(np.sort(frame["timestamp"].unique()))))
     smooth_samples = max(1, round(args.energy_window_seconds * fps))
     profile_rows: list[dict[str, object]] = []
+    detail_profile_rows: list[dict[str, object]] = []
+    event_series_rows: list[dict[str, object]] = []
+    event_count_rows: list[dict[str, object]] = []
     regime_rows: list[dict[str, object]] = []
     threshold_output: dict[str, dict[str, float]] = {}
     truncation_output: dict[str, int] = {}
     bands: list[str] | None = None
+    event_radius = max(1, round(args.event_window_seconds * fps))
+    event_refractory = max(1, round(args.event_refractory_seconds * fps))
 
     for episode, episode_frame in frame.groupby("episode_index", sort=True):
         episode_frame = episode_frame.sort_values("frame_index")
@@ -256,6 +374,14 @@ def main() -> None:
         time = episode_frame["timestamp"].to_numpy(dtype=float)
         labels, thresholds, pressure_signals = derive_pressure_regimes(pressure)
         threshold_output[str(episode)] = thresholds
+        onsets = {
+            event: event_onsets(labels, event, event_radius, event_refractory)
+            for event in EVENTS
+        }
+        for event, indices in onsets.items():
+            event_count_rows.append(
+                {"episode": int(episode), "event": event, "events": int(len(indices))}
+            )
 
         channel_energies: list[np.ndarray] = []
         for channel_index, channel in enumerate(CHANNELS):
@@ -267,6 +393,10 @@ def main() -> None:
             channel_energies.append(energy)
             denominator = np.maximum(energy.sum(axis=1, keepdims=True), 1e-12)
             fractions = energy / denominator
+            detail_energy = energy[:, 1:]
+            detail_denominator = np.maximum(detail_energy.sum(axis=1, keepdims=True), 1e-12)
+            detail_fractions = detail_energy / detail_denominator
+            detail_bands = bands[1:]
             for regime in REGIMES:
                 mask = labels == regime
                 if not mask.any():
@@ -280,6 +410,46 @@ def main() -> None:
                             "channel": channel,
                             "band": band,
                             "energy_fraction": float(value),
+                        }
+                    )
+                mean_detail_profile = detail_fractions[mask].mean(axis=0)
+                for band, value in zip(detail_bands, mean_detail_profile):
+                    detail_profile_rows.append(
+                        {
+                            "episode": int(episode),
+                            "regime": regime,
+                            "channel": channel,
+                            "band": band,
+                            "energy_fraction": float(value),
+                        }
+                    )
+
+            relative_samples = np.arange(-event_radius, event_radius + 1)
+            total_detail_fraction = fractions[:, 1:].sum(axis=1)
+            for event, indices in onsets.items():
+                if not len(indices):
+                    continue
+                detail_windows = np.stack(
+                    [detail_fractions[index - event_radius : index + event_radius + 1] for index in indices]
+                ).mean(axis=0)
+                total_windows = np.stack(
+                    [total_detail_fraction[index - event_radius : index + event_radius + 1] for index in indices]
+                ).mean(axis=0)
+                for band_index, band in enumerate(detail_bands):
+                    for relative_sample, value in zip(relative_samples, detail_windows[:, band_index]):
+                        event_series_rows.append(
+                            {
+                                "episode": int(episode), "event": event, "event_count": len(indices),
+                                "channel": channel, "band": band,
+                                "relative_sample": int(relative_sample), "value": float(value),
+                            }
+                        )
+                for relative_sample, value in zip(relative_samples, total_windows):
+                    event_series_rows.append(
+                        {
+                            "episode": int(episode), "event": event, "event_count": len(indices),
+                            "channel": channel, "band": "ALL_DETAILS",
+                            "relative_sample": int(relative_sample), "value": float(value),
                         }
                     )
 
@@ -304,11 +474,22 @@ def main() -> None:
     assert bands is not None
     episode_profiles = pd.DataFrame(profile_rows)
     summary = bootstrap_profiles(episode_profiles, args.bootstrap, args.seed)
+    detail_episode_profiles = pd.DataFrame(detail_profile_rows)
+    detail_summary = bootstrap_profiles(detail_episode_profiles, args.bootstrap, args.seed + 1)
+    event_episode_series = pd.DataFrame(event_series_rows)
+    event_summary = bootstrap_event_series(event_episode_series, args.bootstrap, args.seed + 2)
     episode_profiles.to_csv(args.output / "episode_band_profiles.csv", index=False)
     summary.to_csv(args.output / "regime_band_summary.csv", index=False)
+    detail_episode_profiles.to_csv(args.output / "detail_only_episode_profiles.csv", index=False)
+    detail_summary.to_csv(args.output / "detail_only_summary.csv", index=False)
+    event_episode_series.to_csv(args.output / "event_centered_episode_series.csv", index=False)
+    event_summary.to_csv(args.output / "event_centered_summary.csv", index=False)
+    pd.DataFrame(event_count_rows).to_csv(args.output / "event_counts.csv", index=False)
     pd.DataFrame(regime_rows).to_csv(args.output / "regime_counts.csv", index=False)
     (args.output / "pressure_thresholds.json").write_text(json.dumps(threshold_output, indent=2))
     plot_heatmaps(summary, args.output, bands)
+    plot_detail_heatmaps(detail_summary, args.output, bands[1:])
+    plot_event_series(event_summary, args.output, fps, bands[1:])
 
     analyzed_frames = int(
         sum(
@@ -330,6 +511,9 @@ def main() -> None:
         }
         | {f"A{args.levels}": [0.0, fps / (2 ** (args.levels + 1))]},
         "energy_window_seconds": args.energy_window_seconds,
+        "event_window_seconds": args.event_window_seconds,
+        "event_refractory_seconds": args.event_refractory_seconds,
+        "event_definition": "Onsets of pressure-derived loading, unloading, and spatial-change regimes.",
         "center_force": args.center_force,
         "truncation": {
             "policy": "Drop trailing real samples until episode length is divisible by 2**levels.",
