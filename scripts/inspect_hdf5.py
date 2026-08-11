@@ -1,81 +1,121 @@
+#!/usr/bin/env python3
+"""Inspect a ManiSkill-to-MuJoCo / robomimic HDF5 dataset."""
+
+import argparse
+from pathlib import Path
+
 import h5py
-import json
+import numpy as np
 
-custom = '/Users/ezraakresh/Documents/LIBERO/datasets/custom/shake_cup_demo.hdf5'
-ref = '/Users/ezraakresh/Documents/LIBERO/datasets/libero_90/KITCHEN_SCENE8_put_the_right_moka_pot_on_the_stove_demo.hdf5'
 
-def get_structure(path):
-    info = {}
-    with h5py.File(path, 'r') as f:
-        info['root_attrs'] = list(f.attrs.keys())
-        info['data_attrs'] = list(f['data'].attrs.keys())
-        demo = sorted(f['data'].keys())[0]
-        info['demo_attrs'] = list(f[f'data/{demo}'].attrs.keys())
-        info['demo_keys'] = list(f[f'data/{demo}'].keys())
-        info['obs_keys'] = list(f[f'data/{demo}/obs'].keys())
-        info['actions_shape'] = f[f'data/{demo}/actions'].shape[1]
-        info['states_shape'] = f[f'data/{demo}/states'].shape[1]
-        info['robot_states_shape'] = f[f'data/{demo}/robot_states'].shape[1]
-        # Check data attrs values (non-model_file)
-        info['data_attr_values'] = {}
-        for k in f['data'].attrs.keys():
-            v = f['data'].attrs[k]
-            if isinstance(v, (str, int, float)):
-                info['data_attr_values'][k] = v
-            elif hasattr(v, 'tolist'):
-                info['data_attr_values'][k] = v.tolist()
-    return info
+def format_attrs(obj, max_length=240):
+    if not obj.attrs:
+        return "none"
+    formatted = []
+    for key, value in obj.attrs.items():
+        rendered = repr(value)
+        if len(rendered) > max_length:
+            rendered = rendered[:max_length] + f"... <{len(rendered)} chars>"
+        formatted.append(f"{key}={rendered}")
+    return ", ".join(formatted)
 
-c = get_structure(custom)
-r = get_structure(ref)
 
-print("=== ROOT ATTRS ===")
-print(f"  Custom:    {c['root_attrs']}")
-print(f"  Reference: {r['root_attrs']}")
+def dataset_rows(dataset):
+    return dataset.shape[0] if dataset.ndim else None
 
-print("\n=== DATA GROUP ATTRS ===")
-print(f"  Custom:    {c['data_attrs']}")
-print(f"  Reference: {r['data_attrs']}")
-missing_in_custom = set(r['data_attrs']) - set(c['data_attrs'])
-extra_in_custom   = set(c['data_attrs']) - set(r['data_attrs'])
-print(f"  Missing in custom:  {missing_in_custom}")
-print(f"  Extra in custom:    {extra_in_custom}")
 
-print("\n=== DEMO ATTRS ===")
-print(f"  Custom:    {c['demo_attrs']}")
-print(f"  Reference: {r['demo_attrs']}")
-missing = set(r['demo_attrs']) - set(c['demo_attrs'])
-extra   = set(c['demo_attrs']) - set(r['demo_attrs'])
-print(f"  Missing in custom: {missing}")
-print(f"  Extra in custom:   {extra}")
+def inspect_file(path):
+    path = Path(path).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"HDF5 file not found: {path}")
 
-print("\n=== DEMO KEYS (datasets) ===")
-print(f"  Custom:    {sorted(c['demo_keys'])}")
-print(f"  Reference: {sorted(r['demo_keys'])}")
-missing = set(r['demo_keys']) - set(c['demo_keys'])
-extra   = set(c['demo_keys']) - set(r['demo_keys'])
-print(f"  Missing in custom: {missing}")
-print(f"  Extra in custom:   {extra}")
+    print(f"File: {path}")
+    print(f"Size: {path.stat().st_size / (1024 ** 2):.1f} MiB")
 
-print("\n=== OBS KEYS ===")
-print(f"  Custom:    {sorted(c['obs_keys'])}")
-print(f"  Reference: {sorted(r['obs_keys'])}")
-missing = set(r['obs_keys']) - set(c['obs_keys'])
-extra   = set(c['obs_keys']) - set(r['obs_keys'])
-print(f"  Missing in custom: {missing}")
-print(f"  Extra in custom:   {extra}")
+    with h5py.File(path, "r") as handle:
+        print(f"Root attributes: {format_attrs(handle)}")
+        if "data" not in handle:
+            print("No /data group found. Root contents:")
+            handle.visititems(
+                lambda name, obj: print(
+                    f"  /{name}: shape={obj.shape}, dtype={obj.dtype}"
+                    if isinstance(obj, h5py.Dataset)
+                    else f"  /{name}/"
+                )
+            )
+            return
 
-print("\n=== DATASET SHAPES ===")
-print(f"  actions dim:      custom={c['actions_shape']}   ref={r['actions_shape']}")
-print(f"  states dim:       custom={c['states_shape']}    ref={r['states_shape']}  ← scene-specific, OK")
-print(f"  robot_states dim: custom={c['robot_states_shape']}    ref={r['robot_states_shape']}")
+        data = handle["data"]
+        demo_names = sorted(
+            (name for name, obj in data.items() if isinstance(obj, h5py.Group)),
+            key=lambda name: (
+                0,
+                int(name.split("_")[-1]),
+            )
+            if name.split("_")[-1].isdigit()
+            else (1, name),
+        )
+        total = data.attrs.get("total")
+        print(f"Data attributes: {format_attrs(data)}")
+        print(f"Demos: {len(demo_names)}" + (f"; total transitions: {total}" if total is not None else ""))
+        if not demo_names:
+            return
 
-print("\n=== DATA ATTR VALUES (non-binary) ===")
-for k in sorted(set(c['data_attr_values']) | set(r['data_attr_values'])):
-    cv = c['data_attr_values'].get(k, '<MISSING>')
-    rv = r['data_attr_values'].get(k, '<MISSING>')
-    match = '✓' if cv == rv else '✗'
-    if k not in ('bddl_file_content', 'model_file', 'env_args'):
-        print(f"  {match} {k}:")
-        print(f"      custom: {cv}")
-        print(f"      ref:    {rv}")
+        demo = data[demo_names[0]]
+        print(f"\nFirst demo: /data/{demo_names[0]}")
+        print(f"Attributes: {format_attrs(demo)}")
+
+        datasets = {}
+
+        def collect(name, obj):
+            if isinstance(obj, h5py.Dataset):
+                datasets[name] = obj
+                print(f"  {name}: shape={obj.shape}, dtype={obj.dtype}")
+
+        demo.visititems(collect)
+
+        expected_rows = dataset_rows(datasets["actions"]) if "actions" in datasets else None
+        if expected_rows is not None:
+            mismatches = []
+            for name, dataset in datasets.items():
+                rows = dataset_rows(dataset)
+                if rows is not None and rows != expected_rows:
+                    mismatches.append(f"{name}={rows}")
+            print(f"\nTransition alignment: actions={expected_rows}", end="")
+            print("; OK" if not mismatches else "; mismatches: " + ", ".join(mismatches))
+
+        print("\nForce/torque fields:")
+        wrench_names = [
+            "obs/robot0_eef_force",
+            "obs/robot0_eef_torque",
+            "next_obs/robot0_eef_force",
+            "next_obs/robot0_eef_torque",
+        ]
+        found = False
+        for name in wrench_names:
+            if name not in datasets:
+                continue
+            found = True
+            values = datasets[name][...]
+            norms = np.linalg.norm(values, axis=-1)
+            print(
+                f"  {name}: shape={values.shape}, finite={bool(np.isfinite(values).all())}, "
+                f"norm min/mean/max={norms.min():.6g}/{norms.mean():.6g}/{norms.max():.6g}"
+            )
+        if not found:
+            print("  none found")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("files", nargs="+", help="HDF5 file(s) to inspect")
+    args = parser.parse_args()
+
+    for index, path in enumerate(args.files):
+        if index:
+            print("\n" + "=" * 80 + "\n")
+        inspect_file(path)
+
+
+if __name__ == "__main__":
+    main()
