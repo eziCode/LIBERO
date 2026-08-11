@@ -7,8 +7,11 @@ writes a compact HDF5 sidecar with matching demo names and timestep indices.
 
 The output datasets are:
 
-    data/<demo>/obs/robot0_eef_force   (T, 3), Newtons
-    data/<demo>/obs/robot0_eef_torque  (T, 3), Newton-metres
+    data/<demo>/obs/robot0_eef_force       (T, 3), Newtons
+    data/<demo>/obs/robot0_eef_torque      (T, 3), Newton-metres
+    data/<demo>/obs/gripper_contact_force  (T, 1), Newtons
+    data/<demo>/obs/left_gripper_force     (T, 1), Newtons
+    data/<demo>/obs/right_gripper_force    (T, 1), Newtons
 
 Each sample is read immediately after applying the corresponding source action.
 The wrench is expressed in the MuJoCo force/torque sensor frame attached to the
@@ -28,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 import h5py
+import mujoco
 import numpy as np
 import robosuite as suite
 import robosuite
@@ -51,6 +55,16 @@ import mimicgen.envs.robosuite  # noqa: F401
 
 FORCE_KEY = "robot0_eef_force"
 TORQUE_KEY = "robot0_eef_torque"
+GRIPPER_CONTACT_KEY = "gripper_contact_force"
+LEFT_GRIPPER_KEY = "left_gripper_force"
+RIGHT_GRIPPER_KEY = "right_gripper_force"
+OUTPUT_KEYS = (
+    FORCE_KEY,
+    TORQUE_KEY,
+    GRIPPER_CONTACT_KEY,
+    LEFT_GRIPPER_KEY,
+    RIGHT_GRIPPER_KEY,
+)
 
 
 def natural_demo_key(name: str) -> tuple[str, int | str]:
@@ -120,13 +134,46 @@ def reset_to_demo(env, model_xml: str, initial_state: np.ndarray) -> None:
     env.sim.forward()
 
 
+def gripper_contact_forces(sim, robot) -> tuple[float, float]:
+    """Return summed normal contact force on the left and right fingers."""
+    contact_geoms = robot.gripper.contact_geoms
+    left_ids = {
+        sim.model.geom_name2id(name) for name in contact_geoms if "finger1" in name
+    }
+    right_ids = {
+        sim.model.geom_name2id(name) for name in contact_geoms if "finger2" in name
+    }
+    left_force = 0.0
+    right_force = 0.0
+    contact_wrench = np.zeros(6, dtype=np.float64)
+    for contact_index in range(sim.data.ncon):
+        contact = sim.data.contact[contact_index]
+        touches_left = contact.geom1 in left_ids or contact.geom2 in left_ids
+        touches_right = contact.geom1 in right_ids or contact.geom2 in right_ids
+        if not (touches_left or touches_right):
+            continue
+        contact_wrench.fill(0.0)
+        mujoco.mj_contactForce(
+            sim.model._model,
+            sim.data._data,
+            contact_index,
+            contact_wrench,
+        )
+        normal_force = abs(float(contact_wrench[0]))
+        if touches_left:
+            left_force += normal_force
+        if touches_right:
+            right_force += normal_force
+    return left_force, right_force
+
+
 def replay_demo(
     env,
     states: np.ndarray,
     actions: np.ndarray,
     model_xml: str,
     correction_threshold: float,
-) -> tuple[np.ndarray, np.ndarray, dict[str, float | int]]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, float | int]]:
     if len(states) != len(actions):
         raise ValueError(
             f"states/actions length mismatch: {len(states)} != {len(actions)}"
@@ -135,6 +182,9 @@ def replay_demo(
     reset_to_demo(env, model_xml, states[0])
     forces = np.empty((len(actions), 3), dtype=np.float32)
     torques = np.empty((len(actions), 3), dtype=np.float32)
+    gripper_forces = np.empty((len(actions), 1), dtype=np.float32)
+    left_gripper_forces = np.empty((len(actions), 1), dtype=np.float32)
+    right_gripper_forces = np.empty((len(actions), 1), dtype=np.float32)
     errors: list[float] = []
     corrections = 0
 
@@ -142,6 +192,10 @@ def replay_demo(
         env.step(action)
         forces[index] = np.asarray(env.robots[0].ee_force, dtype=np.float32)
         torques[index] = np.asarray(env.robots[0].ee_torque, dtype=np.float32)
+        left_force, right_force = gripper_contact_forces(env.sim, env.robots[0])
+        left_gripper_forces[index, 0] = left_force
+        right_gripper_forces[index, 0] = right_force
+        gripper_forces[index, 0] = left_force + right_force
 
         if index + 1 < len(states):
             replay_state = env.sim.get_state().flatten()
@@ -159,7 +213,14 @@ def replay_demo(
         "mean_state_error": float(np.mean(errors)) if errors else 0.0,
         "state_corrections": corrections,
     }
-    return forces, torques, stats
+    return (
+        forces,
+        torques,
+        gripper_forces,
+        left_gripper_forces,
+        right_gripper_forces,
+        stats,
+    )
 
 
 def initialize_output(
@@ -208,25 +269,34 @@ def extract_file(
                     env_meta=env_meta,
                     correction_threshold=correction_threshold,
                 )
-            elif output.attrs.get("source_file") != source_path.name:
-                raise RuntimeError(
-                    f"{output_path} belongs to a different source file; use --overwrite"
-                )
+            else:
+                metadata = output.get("force_torque_metadata")
+                recorded_source = output.attrs.get("source_file")
+                if recorded_source is None and metadata is not None:
+                    recorded_source = metadata.attrs.get("source_file")
+                if recorded_source != source_path.name:
+                    raise RuntimeError(
+                        f"{output_path} belongs to a different source file; use --overwrite"
+                    )
 
             env = make_environment(env_meta)
             try:
                 started = time.monotonic()
                 for number, demo_name in enumerate(demos, start=1):
                     output_obs_path = f"data/{demo_name}/obs"
-                    if (
-                        f"{output_obs_path}/{FORCE_KEY}" in output
-                        and f"{output_obs_path}/{TORQUE_KEY}" in output
-                    ):
+                    if all(f"{output_obs_path}/{key}" in output for key in OUTPUT_KEYS):
                         print(f"[{number}/{len(demos)}] {demo_name}: already complete")
                         continue
 
                     demo = source[f"data/{demo_name}"]
-                    forces, torques, stats = replay_demo(
+                    (
+                        forces,
+                        torques,
+                        gripper_forces,
+                        left_gripper_forces,
+                        right_gripper_forces,
+                        stats,
+                    ) = replay_demo(
                         env=env,
                         states=demo["states"][()],
                         actions=demo["actions"][()],
@@ -235,15 +305,35 @@ def extract_file(
                     )
 
                     obs = output.require_group(output_obs_path)
-                    for key in (FORCE_KEY, TORQUE_KEY):
+                    for key in OUTPUT_KEYS:
                         if key in obs:
                             del obs[key]
                     obs.create_dataset(FORCE_KEY, data=forces, compression="gzip", shuffle=True)
                     obs.create_dataset(TORQUE_KEY, data=torques, compression="gzip", shuffle=True)
-                    demo_out = output[f"data/{demo_name}"]
-                    demo_out.attrs["num_samples"] = len(forces)
+                    obs.create_dataset(
+                        GRIPPER_CONTACT_KEY,
+                        data=gripper_forces,
+                        compression="gzip",
+                        shuffle=True,
+                    )
+                    obs.create_dataset(
+                        LEFT_GRIPPER_KEY,
+                        data=left_gripper_forces,
+                        compression="gzip",
+                        shuffle=True,
+                    )
+                    obs.create_dataset(
+                        RIGHT_GRIPPER_KEY,
+                        data=right_gripper_forces,
+                        compression="gzip",
+                        shuffle=True,
+                    )
+                    stats_group = output.require_group(
+                        f"force_torque_metadata/demos/{demo_name}"
+                    )
+                    stats_group.attrs["num_samples"] = len(forces)
                     for key, value in stats.items():
-                        demo_out.attrs[key] = value
+                        stats_group.attrs[key] = value
                     output.flush()
 
                     elapsed = time.monotonic() - started
@@ -254,8 +344,7 @@ def extract_file(
                     )
 
                 completed = sum(
-                    f"data/{name}/obs/{FORCE_KEY}" in output
-                    and f"data/{name}/obs/{TORQUE_KEY}" in output
+                    all(f"data/{name}/obs/{key}" in output for key in OUTPUT_KEYS)
                     for name in demos
                 )
                 output.attrs["completed_demos"] = completed
