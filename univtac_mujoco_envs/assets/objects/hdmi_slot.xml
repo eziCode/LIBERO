@@ -1,0 +1,46 @@
+<mujoco model="univtac_hdmi_slot">
+  <compiler angle="radian"/>
+  <asset>
+    <mesh name="hdmi_slot_exact" file="../meshes/HDMISlot.obj"/>
+    <material name="slot_blue" rgba="0.12 0.48 0.88 1" specular="0.2" shininess="0.3"/>
+  </asset>
+  <worldbody>
+    <body name="wrapper">
+      <body name="object">
+        <!-- Exact source mesh for appearance. The four boxes preserve the
+             receptacle opening; a single MuJoCo mesh geom would convex-hull
+             and incorrectly seal this concave slot. -->
+        <geom name="visual" type="mesh" mesh="hdmi_slot_exact" group="1"
+              contype="0" conaffinity="0" material="slot_blue"/>
+        <geom name="x_negative" type="box" pos="-0.01475 0 0.00625"
+              size="0.01025 0.025 0.00625" group="0" rgba="0 0 0 0"
+              friction="2.5 0.01 0.001" solref="0.005 1"/>
+        <geom name="x_positive" type="box" pos="0.01475 0 0.00625"
+              size="0.01025 0.025 0.00625" group="0" rgba="0 0 0 0"
+              friction="2.5 0.01 0.001" solref="0.005 1"/>
+        <geom name="y_negative" type="box" pos="0 -0.01675 0.00625"
+              size="0.0045 0.00825 0.00625" group="0" rgba="0 0 0 0"
+              friction="2.5 0.01 0.001" solref="0.005 1"/>
+        <geom name="y_positive" type="box" pos="0 0.01675 0.00625"
+              size="0.0045 0.00825 0.00625" group="0" rgba="0 0 0 0"
+              friction="2.5 0.01 0.001" solref="0.005 1"/>
+        <geom name="hole_floor" type="box" pos="0 0 0.0005"
+              size="0.0045 0.0085 0.0005" group="0" rgba="0 0 0 0"
+              friction="2.5 0.01 0.001" solref="0.005 1"/>
+        <!-- Compliant HDMI retention tabs. The source TacEx socket includes
+             insertion resistance that is absent from a rigid clearance-only
+             MuJoCo port. These opposing, invisible tabs add 0.1 mm preload
+             per side over the upper insertion region. -->
+        <geom name="retention_y_negative" type="box" pos="0 -0.0078 0.01075"
+              size="0.0045 0.0003 0.00125" group="0" rgba="0 0 0 0"
+              friction="6.0 0.02 0.001" solref="0.005 1" solimp="0.9 0.98 0.001"/>
+        <geom name="retention_y_positive" type="box" pos="0 0.0078 0.01075"
+              size="0.0045 0.0003 0.00125" group="0" rgba="0 0 0 0"
+              friction="6.0 0.02 0.001" solref="0.005 1" solimp="0.9 0.98 0.001"/>
+        <site name="bottom" pos="0 0 0" size="0.001" rgba="0 0 0 0"/>
+        <site name="top" pos="0 0 0.0125" size="0.001" rgba="0 0 0 0"/>
+        <site name="horizontal_radius" pos="0.025 0 0" size="0.001" rgba="0 0 0 0"/>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>

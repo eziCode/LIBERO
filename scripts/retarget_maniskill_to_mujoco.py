@@ -31,9 +31,11 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 import h5py
+import mujoco
 import numpy as np
 import robosuite as suite
 from robosuite.controllers import load_controller_config
+from robosuite.utils import transform_utils as T
 
 # Registers the standalone ports. This package does not touch LIBERO BDDL tasks.
 import maniskill_mujoco_envs  # noqa: F401
@@ -297,7 +299,55 @@ def numeric_observation(obs: dict[str, Any], env) -> dict[str, np.ndarray]:
     robot = env.robots[0]
     result[FORCE_KEY] = np.asarray(robot.ee_force, dtype=np.float32).copy()
     result[TORQUE_KEY] = np.asarray(robot.ee_torque, dtype=np.float32).copy()
+    joint = np.asarray(robot._joint_positions, dtype=np.float32).copy()
+    gripper = np.asarray(
+        env.sim.data.qpos[robot._ref_gripper_joint_pos_indexes], dtype=np.float32
+    ).copy()
+    ee_pos = np.asarray(robot._hand_pos, dtype=np.float32).copy()
+    ee_ori = np.asarray(T.quat2axisangle(T.mat2quat(robot._hand_orn)), dtype=np.float32)
+    left, right = finger_contact_forces(env)
+    result.update(
+        joint_states=joint,
+        gripper_states=gripper,
+        ee_pos=ee_pos,
+        ee_ori=ee_ori,
+        ee_states=np.concatenate((ee_pos, ee_ori)),
+        ee_force=result[FORCE_KEY],
+        ee_torque=result[TORQUE_KEY],
+        left_gripper_force=np.asarray([left], dtype=np.float32),
+        right_gripper_force=np.asarray([right], dtype=np.float32),
+    )
     return result
+
+
+def finger_contact_forces(env) -> tuple[float, float]:
+    names = env.robots[0].gripper.contact_geoms
+    geom_ids = [
+        {env.sim.model.geom_name2id(name) for name in names if f"finger{side}" in name}
+        for side in (1, 2)
+    ]
+    result = [0.0, 0.0]
+    wrench = np.zeros(6)
+    for index in range(env.sim.data.ncon):
+        contact = env.sim.data.contact[index]
+        for side, ids in enumerate(geom_ids):
+            if contact.geom1 in ids or contact.geom2 in ids:
+                mujoco.mj_contactForce(env.sim.model._model, env.sim.data._data, index, wrench)
+                result[side] += abs(float(wrench[0]))
+    return result[0], result[1]
+
+
+def libero_actions(result: dict[str, Any]) -> np.ndarray:
+    current = result["obs"]
+    following = result["next_obs"]
+    actions = np.empty((len(current), 7), dtype=np.float32)
+    for index, (obs, next_obs) in enumerate(zip(current, following)):
+        actions[index, :3] = np.clip((next_obs["ee_pos"] - obs["ee_pos"]) / 0.05, -1, 1)
+        current_quat = obs["robot0_eef_quat"]
+        next_quat = next_obs["robot0_eef_quat"]
+        actions[index, 3:6] = np.clip(T.get_orientation_error(next_quat, current_quat) / 0.5, -1, 1)
+        actions[index, 6] = result["actions"][index, -1]
+    return actions
 
 
 def stack_observations(items: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
@@ -528,13 +578,15 @@ def convert(args: argparse.Namespace) -> None:
                         copy_object_poses=not args.no_copy_object_poses,
                     )
                 demo = data.create_group(f"demo_{output_index}")
+                result["mujoco_joint_actions"] = result["actions"]
+                result["actions"] = libero_actions(result)
+                robot_states = np.stack(
+                    [np.concatenate((obs["joint_states"], obs["gripper_states"])) for obs in result["obs"]]
+                )
+                result["robot_states"] = robot_states.astype(np.float32)
                 for key in (
-                    "states",
-                    "actions",
-                    "source_actions",
-                    "rewards",
-                    "dones",
-                    "tracking_error",
+                    "states", "actions", "mujoco_joint_actions", "source_actions",
+                    "robot_states", "rewards", "dones", "tracking_error",
                 ):
                     demo.create_dataset(key, data=result[key], compression="gzip")
                 write_observation_group(demo, "obs", result["obs"])

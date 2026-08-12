@@ -1,0 +1,21 @@
+<mujoco model="univtac_hdmi">
+  <compiler angle="radian"/>
+  <asset>
+    <mesh name="hdmi_exact" file="../meshes/HDMI.obj"/>
+    <material name="hdmi_black" rgba="0.025 0.025 0.025 1" specular="0.25" shininess="0.35"/>
+  </asset>
+  <worldbody>
+    <body name="wrapper">
+      <body name="object">
+        <geom name="collision" type="box" pos="-0.000237426 0 0.015"
+              size="0.004 0.008 0.015" group="0"
+              density="1000" friction="2.5 0.01 0.001" solref="0.005 1"/>
+        <geom name="visual" type="mesh" mesh="hdmi_exact" group="1"
+              contype="0" conaffinity="0" material="hdmi_black"/>
+        <site name="bottom" pos="0 0 0" size="0.001" rgba="0 0 0 0"/>
+        <site name="top" pos="0 0 0.03" size="0.001" rgba="0 0 0 0"/>
+        <site name="horizontal_radius" pos="0.004 0 0" size="0.001" rgba="0 0 0 0"/>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>
