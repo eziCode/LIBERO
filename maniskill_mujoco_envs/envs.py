@@ -18,6 +18,10 @@ from .objects import box_with_hole, charger, charger_receptacle, two_color_peg
 
 
 TABLE_OFFSET = np.array([0.0, 0.0, 0.8])
+# The robosuite Panda MJCF and ManiSkill Panda URDF use base-link origins that
+# differ by 6.9 mm. This calibrated base height makes their TCP positions agree
+# across the same joint trajectory (sub-millimetre residual error).
+PANDA_BASE_Z_CORRECTION = -0.0069
 TABLE_FULL_SIZE = (0.8, 0.8, 0.05)
 TABLE_FRICTION = (1.0, 5e-3, 1e-4)
 CUBE_HALF_SIZE = 0.02
@@ -101,7 +105,10 @@ class ManiSkillMujocoBase(SingleArmEnv):
             robots=robots,
             env_configuration=env_configuration,
             controller_configs=controller_configs,
-            mount_types="default",
+            # ManiSkill mounts the Panda directly at [-0.615, 0, 0]. The
+            # robosuite default Panda pedestal raises the arm by ~0.913 m and
+            # changes every robot-to-object transform, so it must not be used.
+            mount_types=None,
             gripper_types=gripper_types,
             initialization_noise=initialization_noise,
             use_camera_obs=use_camera_obs,
@@ -129,9 +136,43 @@ class ManiSkillMujocoBase(SingleArmEnv):
 
     def _load_model(self):
         super()._load_model()
-        # Match the source task's Panda base x coordinate. MuJoCo retains its
-        # own mount and table-height convention.
-        self.robots[0].robot_model.set_base_xpos((-0.615, 0.0, 0.0))
+        # The legacy robosuite Panda CAD contains saturated red / green / blue
+        # sub-materials. In this mesh export they cover large shell patches,
+        # producing a false multicolored robot. A Franka Panda uses neutral
+        # white and charcoal shells, so normalize only saturated materials and
+        # retain the original neutral whites / grays.
+        for material in self.robots[0].robot_model.asset.iter("material"):
+            rgba_text = material.get("rgba")
+            if not rgba_text:
+                continue
+            rgba = np.fromstring(rgba_text, sep=" ")
+            if rgba.size == 4 and np.ptp(rgba[:3]) > 0.2:
+                luminance = float(np.dot(rgba[:3], [0.2126, 0.7152, 0.0722]))
+                neutral = 0.92 if luminance >= 0.55 else 0.18
+                material.set("rgba", f"{neutral} {neutral} {neutral} {rgba[3]}")
+        # MuJoCo 2.3.7's macOS binding exposes mjvOption.geomgroup as a copy,
+        # so robosuite cannot hide group-0 collision meshes at render time.
+        # Keep collision/contact properties intact while making only the
+        # robot's collision geometry visually transparent in the MJCF.
+        for geom in self.robots[0].robot_model.worldbody.iter("geom"):
+            if geom.get("group", "0") == "0":
+                geom.set("rgba", "0 0 0 0")
+        # robosuite's Panda grip site is rotated -90 degrees about its local z
+        # relative to ManiSkill's panda_hand_tcp. Rotate the site frame back so
+        # TCP quaternions and Cartesian controller axes share ManiSkill's
+        # convention. This does not move the site position.
+        for site in self.robots[0].robot_model.worldbody.iter("site"):
+            if site.get("name", "").endswith("grip_site"):
+                site.set("quat", "0.7071067811865476 0 0 0.7071067811865475")
+        # The whole ManiSkill workspace is translated by TABLE_OFFSET in this
+        # MuJoCo port. Apply that translation to the robot as well as objects.
+        self.robots[0].robot_model.set_base_xpos(
+            (
+                -0.615,
+                0.0,
+                float(self.table_offset[2] + PANDA_BASE_Z_CORRECTION),
+            )
+        )
         arena = TableArena(
             table_full_size=self.table_full_size,
             table_friction=self.table_friction,
@@ -147,6 +188,16 @@ class ManiSkillMujocoBase(SingleArmEnv):
             mujoco_robots=[robot.robot_model for robot in self.robots],
             mujoco_objects=list(self.task_objects.values()),
         )
+        # See the macOS MuJoCo 2.3.7 geomgroup note above. Apply the intended
+        # render_collision_mesh=False behavior to the fully assembled task so
+        # collision and visual copies do not z-fight and contaminate colors.
+        if not self.render_collision_mesh:
+            for geom in self.model.worldbody.iter("geom"):
+                if geom.get("group", "0") == "0":
+                    rgba = np.fromstring(geom.get("rgba", "0.5 0.5 0.5 1"), sep=" ")
+                    if rgba.size == 4:
+                        rgba[3] = 0.0
+                        geom.set("rgba", " ".join(str(value) for value in rgba))
 
     def _setup_references(self):
         super()._setup_references()
@@ -308,7 +359,8 @@ class ManiSkillMujocoStackCube(ManiSkillMujocoBase):
     environment_label = "ManiSkill StackCube-v1 MuJoCo Port"
 
     def __init__(self, **kwargs):
-        kwargs.setdefault("horizon", 200)
+        # ManiSkill registers StackCube-v1 with max_episode_steps=50.
+        kwargs.setdefault("horizon", 50)
         super().__init__(**kwargs)
 
     def _build_task_objects(self):
@@ -389,7 +441,8 @@ class ManiSkillMujocoPegInsertionSide(ManiSkillMujocoBase):
         self._peg_half_length_override = peg_half_length
         self._peg_radius_override = peg_radius
         self._set_geometry_from_seed(self.geometry_seed)
-        kwargs.setdefault("horizon", 300)
+        # ManiSkill registers PegInsertionSide-v1 with max_episode_steps=100.
+        kwargs.setdefault("horizon", 100)
         super().__init__(**kwargs)
 
     def _set_geometry_from_seed(self, seed: int) -> None:
@@ -477,7 +530,8 @@ class ManiSkillMujocoPlugCharger(ManiSkillMujocoBase):
     receptacle_size = np.array([1e-2, 5e-2, 5e-2])
 
     def __init__(self, **kwargs):
-        kwargs.setdefault("horizon", 300)
+        # ManiSkill registers PlugCharger-v1 with max_episode_steps=200.
+        kwargs.setdefault("horizon", 200)
         super().__init__(**kwargs)
 
     def _build_task_objects(self):
