@@ -1,0 +1,70 @@
+{
+  "generated_at": "2026-08-13T17:28:18.578984+00:00",
+  "nodes": {
+    "convert_maniskill_to_robomimic": {
+      "code_fingerprint": "b086fd1f795dc53f36425d6adaaf9cb0730db07af025f093ec135b7be450c821",
+      "label": "convert_maniskill_to_robomimic.py",
+      "last": "2026-08-13T17:26:53.975655+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-13T17:26:53.975655+00:00",
+          "outcome": "useful",
+          "q": "How is the maniskill dataset generated? Like originally, what simulator"
+        }
+      ],
+      "score": 0.999977376,
+      "source_file": "convert_maniskill_to_robomimic.py",
+      "status": "tentative",
+      "uses": 1
+    },
+    "retarget_maniskill_to_mujoco": {
+      "code_fingerprint": "9de38ffba5967058d8972838ed3db853e467e51c21961bc771c3a810cfca1dd6",
+      "label": "retarget_maniskill_to_mujoco.py",
+      "last": "2026-08-13T17:26:53.975655+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-13T17:26:53.975655+00:00",
+          "outcome": "useful",
+          "q": "How is the maniskill dataset generated? Like originally, what simulator"
+        }
+      ],
+      "score": 0.999977376,
+      "source_file": "retarget_maniskill_to_mujoco.py",
+      "status": "tentative",
+      "uses": 1
+    },
+    "retarget_maniskill_to_mujoco_map_trajectory_states": {
+      "code_fingerprint": "9de38ffba5967058d8972838ed3db853e467e51c21961bc771c3a810cfca1dd6",
+      "label": "map_trajectory_states()",
+      "last": "2026-08-13T17:26:53.975655+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-13T17:26:53.975655+00:00",
+          "outcome": "useful",
+          "q": "How is the maniskill dataset generated? Like originally, what simulator"
+        }
+      ],
+      "score": 0.999977376,
+      "source_file": "retarget_maniskill_to_mujoco.py",
+      "status": "tentative",
+      "uses": 1
+    },
+    "retarget_maniskill_to_mujoco_replay_trajectory": {
+      "code_fingerprint": "9de38ffba5967058d8972838ed3db853e467e51c21961bc771c3a810cfca1dd6",
+      "label": "replay_trajectory()",
+      "last": "2026-08-13T17:26:53.975655+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-13T17:26:53.975655+00:00",
+          "outcome": "useful",
+          "q": "How is the maniskill dataset generated? Like originally, what simulator"
+        }
+      ],
+      "score": 0.999977376,
+      "source_file": "retarget_maniskill_to_mujoco.py",
+      "status": "tentative",
+      "uses": 1
+    }
+  },
+  "version": 1
+}

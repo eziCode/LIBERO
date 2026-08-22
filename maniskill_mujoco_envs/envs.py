@@ -245,8 +245,9 @@ class ManiSkillMujocoBase(SingleArmEnv):
 
     def _object_static(self, name: str, linear=1e-2, angular=0.5) -> bool:
         body_id = self.object_body_ids[name]
-        velocity = self.sim.data.body_xvelp[body_id]
-        angular_velocity = self.sim.data.body_xvelr[body_id]
+        body_name = self.sim.model.body_id2name(body_id)
+        velocity = self.sim.data.get_body_xvelp(body_name)
+        angular_velocity = self.sim.data.get_body_xvelr(body_name)
         return np.linalg.norm(velocity) <= linear and np.linalg.norm(angular_velocity) <= angular
 
     def reward(self, action=None):

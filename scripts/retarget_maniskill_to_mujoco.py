@@ -39,6 +39,7 @@ from robosuite.utils import transform_utils as T
 
 # Registers the standalone ports. This package does not touch LIBERO BDDL tasks.
 import maniskill_mujoco_envs  # noqa: F401
+from maniskill_mujoco_envs.wrapper import ManiSkillWrapper
 
 
 FORCE_KEY = "robot0_eef_force"
@@ -109,12 +110,19 @@ def source_episode_metadata(json_path: Path) -> dict[int, dict[str, Any]]:
     return {int(item["episode_id"]): item for item in episodes}
 
 
-def make_environment(env_name: str, control_freq: int):
-    controller = load_controller_config(default_controller="JOINT_POSITION")
+def make_environment(
+    env_name: str, control_freq: int, controller: str = "JOINT_POSITION",
+    joint_kp: float | None = None, joint_damping_ratio: float | None = None,
+):
+    controller_config = load_controller_config(default_controller=controller)
+    if controller == "JOINT_POSITION" and joint_kp is not None:
+        controller_config["kp"] = joint_kp
+    if controller == "JOINT_POSITION" and joint_damping_ratio is not None:
+        controller_config["damping_ratio"] = joint_damping_ratio
     return suite.make(
         env_name=env_name,
         robots="Panda",
-        controller_configs=controller,
+        controller_configs=controller_config,
         gripper_types="PandaGripper",
         has_renderer=False,
         has_offscreen_renderer=False,
@@ -303,8 +311,9 @@ def numeric_observation(obs: dict[str, Any], env) -> dict[str, np.ndarray]:
     gripper = np.asarray(
         env.sim.data.qpos[robot._ref_gripper_joint_pos_indexes], dtype=np.float32
     ).copy()
-    ee_pos = np.asarray(robot._hand_pos, dtype=np.float32).copy()
-    ee_ori = np.asarray(T.quat2axisangle(T.mat2quat(robot._hand_orn)), dtype=np.float32)
+    ee_pos = np.asarray(obs.get("robot0_eef_pos", robot._hand_pos), dtype=np.float32).copy()
+    ee_quat = np.asarray(obs.get("robot0_eef_quat", T.mat2quat(robot._hand_orn)))
+    ee_ori = np.asarray(T.quat2axisangle(ee_quat), dtype=np.float32)
     left, right = finger_contact_forces(env)
     result.update(
         joint_states=joint,
@@ -335,6 +344,26 @@ def finger_contact_forces(env) -> tuple[float, float]:
                 mujoco.mj_contactForce(env.sim.model._model, env.sim.data._data, index, wrench)
                 result[side] += abs(float(wrench[0]))
     return result[0], result[1]
+
+
+def configure_contact_physics(
+    env, surface_friction: float, finger_friction: float, contact_timeconstant: float,
+    gripper_force_limit: float,
+) -> None:
+    """Match the principal PhysX material and contact-response parameters."""
+    finger_names = set(env.robots[0].gripper.contact_geoms)
+    for geom_id in range(env.sim.model.ngeom):
+        if env.sim.model.geom_contype[geom_id] == 0:
+            continue
+        name = env.sim.model.geom_id2name(geom_id)
+        sliding = finger_friction if name in finger_names else surface_friction
+        env.sim.model.geom_friction[geom_id, 0] = sliding
+        env.sim.model.geom_solref[geom_id] = (contact_timeconstant, 1.0)
+        env.sim.model.geom_solimp[geom_id] = (0.95, 0.99, 1e-4, 0.5, 2.0)
+    for actuator_id in env.robots[0]._ref_joint_gripper_actuator_indexes:
+        env.sim.model.actuator_forcerange[actuator_id] = (
+            -gripper_force_limit, gripper_force_limit
+        )
 
 
 def libero_actions(result: dict[str, Any]) -> np.ndarray:
@@ -416,6 +445,234 @@ def replay_trajectory(
         "obs": observations,
         "next_obs": next_observations,
         "copied_objects": copied_objects,
+    }
+
+
+def reference_tcp_poses(env, articulation: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Evaluate the source Panda joint path as TCP poses in the target model."""
+    if articulation.ndim != 2 or articulation.shape[1] < 22:
+        raise ValueError(f"unsupported articulation state shape {articulation.shape}")
+    robot = env.robots[0]
+    saved_state = env.sim.get_state().flatten().copy()
+    positions, quaternions = [], []
+    try:
+        for state in articulation:
+            env.sim.data.qpos[robot._ref_joint_pos_indexes] = state[13:20]
+            env.sim.data.qvel[robot._ref_joint_vel_indexes] = 0.0
+            env.sim.forward()
+            positions.append(np.asarray(env.sim.data.site_xpos[robot.eef_site_id], dtype=np.float64).copy())
+            site_rotation = np.asarray(env.sim.data.site_xmat[robot.eef_site_id]).reshape(3, 3)
+            quaternions.append(T.mat2quat(site_rotation).copy())
+    finally:
+        env.sim.set_state_from_flattened(saved_state)
+        env.sim.forward()
+    return np.asarray(positions), np.asarray(quaternions)
+
+
+def osc_pose_action(
+    current_obs, desired_position, desired_quaternion, gripper, tracking_gain=1.0
+) -> np.ndarray:
+    """Normalized OSC_POSE command from the actual TCP pose to a reference pose."""
+    current_position = np.asarray(current_obs["robot0_eef_pos"], dtype=np.float64)
+    current_quaternion = np.asarray(current_obs["robot0_eef_quat"], dtype=np.float64)
+    position = np.clip(tracking_gain * (desired_position - current_position) / 0.05, -1.0, 1.0)
+    orientation = np.clip(
+        tracking_gain * T.get_orientation_error(desired_quaternion, current_quaternion) / 0.5,
+        -1.0, 1.0,
+    )
+    return np.r_[position, orientation, np.clip(gripper, -1.0, 1.0)].astype(np.float32)
+
+
+def closed_loop_trajectory(
+    env, source: h5py.Group, mapping: TaskMapping, invert_gripper: bool,
+    corrections_per_target: int, terminal_corrections: int,
+    position_tolerance: float, orientation_tolerance: float, tracking_gain: float,
+    pregrasp_corrections: int, gripper_transition_steps: int,
+) -> dict[str, Any]:
+    """Track the source TCP path with feedback through the evaluation wrapper."""
+    source_actions = np.asarray(source["actions"], dtype=np.float32)
+    articulation = source_articulation_states(source)
+    actors = source_actor_states(source)
+    if len(articulation) != len(source_actions) + 1:
+        raise ValueError("closed-loop rollout requires one more state than action")
+
+    env.reset()
+    set_mapped_state(
+        env, articulation[0], {name: value[0] for name, value in actors.items()},
+        mapping.object_map,
+    )
+    robot = env.robots[0]
+    robot.controller.update_initial_joints(
+        np.asarray(robot._joint_positions, dtype=np.float64).copy()
+    )
+    robot.controller.reset_goal()
+    desired_positions, desired_quaternions = reference_tcp_poses(env, articulation)
+    wrapper = ManiSkillWrapper(env)
+    states, observations, next_observations, commands = [], [], [], []
+    rewards, dones, tracking_errors = [], [], []
+    current_obs = env._get_observations(force_update=True)
+
+    targets = list(range(1, len(articulation)))
+    previous_source_gripper = float(source_actions[0, 7]) if source_actions.shape[1] > 7 else 1.0
+    for target_index in targets:
+        # Resolve the redundant Panda posture toward the source configuration.
+        # The externally executed command remains the evaluation OSC action.
+        robot.controller.update_initial_joints(articulation[target_index, 13:20])
+        source_index = min(target_index - 1, len(source_actions) - 1)
+        source_gripper = float(source_actions[source_index, 7]) if source_actions.shape[1] > 7 else 1.0
+        gripper = -source_gripper if invert_gripper else source_gripper
+        changed_gripper = not np.isclose(source_gripper, previous_source_gripper)
+        phases = []
+        if changed_gripper:
+            previous_gripper = -previous_source_gripper if invert_gripper else previous_source_gripper
+            phases.append((previous_gripper, pregrasp_corrections, True))
+            phases.append((gripper, gripper_transition_steps, False))
+        else:
+            phases.append((gripper, corrections_per_target, False))
+        for phase_gripper, phase_steps, stop_when_aligned in phases:
+          for _ in range(phase_steps):
+            command = osc_pose_action(
+                current_obs, desired_positions[target_index], desired_quaternions[target_index], phase_gripper,
+                tracking_gain,
+            )
+            states.append(np.asarray(wrapper.sim.get_state().flatten(), dtype=np.float64))
+            observations.append(numeric_observation(current_obs, env))
+            next_obs, reward, done, _ = wrapper.step(command)
+            next_observations.append(numeric_observation(next_obs, env))
+            commands.append(command)
+            rewards.append(float(reward))
+            dones.append(bool(done))
+            position_error = desired_positions[target_index] - np.asarray(next_obs["robot0_eef_pos"])
+            orientation_error = T.get_orientation_error(
+                desired_quaternions[target_index], np.asarray(next_obs["robot0_eef_quat"])
+            )
+            tracking_errors.append(np.r_[position_error, orientation_error].astype(np.float32))
+            current_obs = next_obs
+            if wrapper.check_success():
+                break
+            if stop_when_aligned and (
+                np.linalg.norm(position_error) <= position_tolerance
+                and np.linalg.norm(orientation_error) <= orientation_tolerance
+            ):
+                break
+          if wrapper.check_success():
+              break
+        previous_source_gripper = source_gripper
+        if wrapper.check_success():
+            break
+
+    # Allow the controller and task objects to settle while continuing to
+    # correct toward the final reference pose.
+    if not wrapper.check_success():
+        source_gripper = float(source_actions[-1, 7]) if source_actions.shape[1] > 7 else 1.0
+        gripper = -source_gripper if invert_gripper else source_gripper
+        for _ in range(terminal_corrections):
+            command = osc_pose_action(
+                current_obs, desired_positions[-1], desired_quaternions[-1], gripper,
+                tracking_gain,
+            )
+            states.append(np.asarray(wrapper.sim.get_state().flatten(), dtype=np.float64))
+            observations.append(numeric_observation(current_obs, env))
+            next_obs, reward, done, _ = wrapper.step(command)
+            next_observations.append(numeric_observation(next_obs, env))
+            commands.append(command)
+            rewards.append(float(reward))
+            dones.append(bool(done))
+            position_error = desired_positions[-1] - np.asarray(next_obs["robot0_eef_pos"])
+            orientation_error = T.get_orientation_error(
+                desired_quaternions[-1], np.asarray(next_obs["robot0_eef_quat"])
+            )
+            tracking_errors.append(np.r_[position_error, orientation_error].astype(np.float32))
+            current_obs = next_obs
+            if wrapper.check_success():
+                break
+
+    return {
+        "states": np.asarray(states), "actions": np.asarray(commands, dtype=np.float32),
+        "source_actions": source_actions, "rewards": np.asarray(rewards, dtype=np.float32),
+        "dones": np.asarray(dones, dtype=np.bool_),
+        "tracking_error": np.asarray(tracking_errors, dtype=np.float32),
+        "obs": observations, "next_obs": next_observations,
+        "copied_objects": sum(name in actors for name, _ in mapping.object_map),
+        "success": wrapper.check_success(),
+    }
+
+
+def joint_closed_loop_trajectory(
+    env, source: h5py.Group, mapping: TaskMapping, invert_gripper: bool,
+    max_joint_step: float, joint_tolerance: float, joint_corrections: int,
+    terminal_corrections: int,
+    surface_friction: float, finger_friction: float, contact_timeconstant: float,
+    gripper_force_limit: float,
+) -> dict[str, Any]:
+    """Track interpolated recorded joint states with feedback in MuJoCo."""
+    source_actions = np.asarray(source["actions"], dtype=np.float32)
+    articulation = source_articulation_states(source)
+    actors = source_actor_states(source)
+    if len(articulation) != len(source_actions) + 1:
+        raise ValueError("joint closed-loop rollout requires states = actions + 1")
+
+    env.reset()
+    configure_contact_physics(
+        env, surface_friction, finger_friction, contact_timeconstant, gripper_force_limit
+    )
+    set_mapped_state(
+        env, articulation[0], {name: value[0] for name, value in actors.items()},
+        mapping.object_map,
+    )
+    robot = env.robots[0]
+    robot.controller.reset_goal()
+    wrapper = ManiSkillWrapper(env)
+    current_obs = env._get_observations(force_update=True)
+    states, observations, next_observations, commands = [], [], [], []
+    rewards, dones, tracking_errors = [], [], []
+
+    def execute(target: np.ndarray, gripper: float, attempts: int) -> bool:
+        nonlocal current_obs
+        for _ in range(attempts):
+            current = np.asarray(robot._joint_positions, dtype=np.float64)
+            arm = scaled_joint_action(robot.controller, target, current)
+            command = np.r_[arm, np.clip(gripper, -1.0, 1.0)].astype(np.float32)
+            states.append(np.asarray(wrapper.sim.get_state().flatten(), dtype=np.float64))
+            observations.append(numeric_observation(current_obs, env))
+            next_obs, reward, done, _ = wrapper.step(command)
+            next_observations.append(numeric_observation(next_obs, env))
+            commands.append(command)
+            rewards.append(float(reward))
+            dones.append(bool(done))
+            error = target - np.asarray(robot._joint_positions, dtype=np.float64)
+            tracking_errors.append(error.astype(np.float32))
+            current_obs = next_obs
+            if wrapper.check_success() or np.max(np.abs(error)) <= joint_tolerance:
+                break
+        return wrapper.check_success()
+
+    initial_reference = np.asarray(articulation[0, 13:20], dtype=np.float64)
+    references = np.asarray(source_actions[:, :7], dtype=np.float64)
+    for index, end in enumerate(references):
+        start = initial_reference if index == 0 else references[index - 1]
+        subdivisions = max(1, int(np.ceil(np.max(np.abs(end - start)) / max_joint_step)))
+        source_gripper = float(source_actions[index, 7]) if source_actions.shape[1] > 7 else 1.0
+        gripper = -source_gripper if invert_gripper else source_gripper
+        for fraction in np.linspace(1.0 / subdivisions, 1.0, subdivisions):
+            if execute(start + fraction * (end - start), gripper, joint_corrections):
+                break
+        if wrapper.check_success():
+            break
+
+    if not wrapper.check_success():
+        source_gripper = float(source_actions[-1, 7]) if source_actions.shape[1] > 7 else 1.0
+        gripper = -source_gripper if invert_gripper else source_gripper
+        execute(references[-1], gripper, terminal_corrections)
+
+    return {
+        "states": np.asarray(states), "actions": np.asarray(commands, dtype=np.float32),
+        "source_actions": source_actions, "rewards": np.asarray(rewards, dtype=np.float32),
+        "dones": np.asarray(dones, dtype=np.bool_),
+        "tracking_error": np.asarray(tracking_errors, dtype=np.float32),
+        "obs": observations, "next_obs": next_observations,
+        "copied_objects": sum(name in actors for name, _ in mapping.object_map),
+        "success": wrapper.check_success(),
     }
 
 
@@ -515,7 +772,15 @@ def convert(args: argparse.Namespace) -> None:
         mapping = TaskMapping(args.env_name, mapping.object_map, "user_override")
 
     metadata = source_episode_metadata(input_path.with_suffix(".json"))
-    env = make_environment(mapping.env_name, args.control_freq)
+    controller = "OSC_POSE" if args.conversion_mode == "closed-loop" else "JOINT_POSITION"
+    joint_kp = args.joint_kp if args.conversion_mode == "joint-closed-loop" else None
+    joint_damping = (
+        args.joint_damping_ratio if args.conversion_mode == "joint-closed-loop" else None
+    )
+    env = make_environment(
+        mapping.env_name, args.control_freq, controller=controller,
+        joint_kp=joint_kp, joint_damping_ratio=joint_damping,
+    )
     output_path = args.output.resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = output_path.with_name(f".{output_path.name}.tmp")
@@ -542,11 +807,13 @@ def convert(args: argparse.Namespace) -> None:
             data.attrs["wrench_units"] = "N,Nm"
             data.attrs["cross_simulation"] = True
             data.attrs["conversion_mode"] = args.conversion_mode
-            data.attrs["state_alignment"] = (
-                "recorded_maniskill_states_mapped_to_mujoco"
-                if args.conversion_mode == "state-map"
-                else "open_loop_mujoco_replay"
-            )
+            data.attrs["state_alignment"] = {
+                "state-map": "recorded_maniskill_states_mapped_to_mujoco",
+                "replay": "open_loop_mujoco_replay",
+                "closed-loop": "closed_loop_tcp_tracking_in_mujoco",
+                "joint-closed-loop": "interpolated_closed_loop_joint_tracking_in_mujoco",
+            }[args.conversion_mode]
+            data.attrs["controller"] = controller
 
             keys = sorted(
                 (key for key in source_file if key.startswith("traj_")),
@@ -557,7 +824,9 @@ def convert(args: argparse.Namespace) -> None:
             if not keys:
                 raise ValueError(f"no traj_* groups found in {input_path}")
 
-            for output_index, source_key in enumerate(keys):
+            accepted = 0
+            rejected = 0
+            for source_key in keys:
                 episode_id = int(source_key.rsplit("_", 1)[1])
                 episode_metadata = metadata.get(episode_id, {})
                 if hasattr(env, "configure_source_episode"):
@@ -569,7 +838,7 @@ def convert(args: argparse.Namespace) -> None:
                         mapping,
                         invert_gripper=not args.no_invert_gripper,
                     )
-                else:
+                elif args.conversion_mode == "replay":
                     result = replay_trajectory(
                         env,
                         source_file[source_key],
@@ -577,9 +846,49 @@ def convert(args: argparse.Namespace) -> None:
                         invert_gripper=not args.no_invert_gripper,
                         copy_object_poses=not args.no_copy_object_poses,
                     )
-                demo = data.create_group(f"demo_{output_index}")
+                elif args.conversion_mode == "closed-loop":
+                    result = closed_loop_trajectory(
+                        env, source_file[source_key], mapping,
+                        invert_gripper=not args.no_invert_gripper,
+                        corrections_per_target=args.corrections_per_target,
+                        terminal_corrections=args.terminal_corrections,
+                        position_tolerance=args.position_tolerance,
+                        orientation_tolerance=args.orientation_tolerance,
+                        tracking_gain=args.tracking_gain,
+                        pregrasp_corrections=args.pregrasp_corrections,
+                        gripper_transition_steps=args.gripper_transition_steps,
+                    )
+                else:
+                    result = joint_closed_loop_trajectory(
+                        env, source_file[source_key], mapping,
+                        invert_gripper=not args.no_invert_gripper,
+                        max_joint_step=args.max_joint_step,
+                        joint_tolerance=args.joint_tolerance,
+                        joint_corrections=args.joint_corrections,
+                        terminal_corrections=args.terminal_corrections,
+                        surface_friction=args.surface_friction,
+                        finger_friction=args.finger_friction,
+                        contact_timeconstant=args.contact_timeconstant,
+                        gripper_force_limit=args.gripper_force_limit,
+                    )
+                rollout_failed = (
+                    args.conversion_mode in ("closed-loop", "joint-closed-loop")
+                    and not result["success"]
+                )
+                if rollout_failed:
+                    rejected += 1
+                    final_error = np.max(np.abs(result["tracking_error"][-1]))
+                    print(
+                        f"{source_key}: rejected (task did not succeed; "
+                        f"final tracking error={final_error:.4f}, "
+                        f"max reward={np.max(result['rewards']):.3f})"
+                    )
+                    if not args.keep_failures:
+                        continue
+                demo = data.create_group(f"demo_{accepted}")
                 result["mujoco_joint_actions"] = result["actions"]
-                result["actions"] = libero_actions(result)
+                if args.conversion_mode not in ("closed-loop", "joint-closed-loop"):
+                    result["actions"] = libero_actions(result)
                 robot_states = np.stack(
                     [np.concatenate((obs["joint_states"], obs["gripper_states"])) for obs in result["obs"]]
                 )
@@ -598,19 +907,22 @@ def convert(args: argparse.Namespace) -> None:
                     episode_metadata, sort_keys=True
                 )
                 demo.attrs["copied_source_object_poses"] = result["copied_objects"]
+                demo.attrs["successful"] = not rollout_failed
                 try:
                     demo.attrs["model_file"] = env.model.get_xml()
                 except AttributeError:
                     pass
                 total += samples
+                accepted += 1
                 if args.conversion_mode == "replay":
                     detail = f", max joint error={np.max(np.abs(result['tracking_error'])):.4f} rad"
                 else:
                     detail = ""
-                print(f"{source_key} -> demo_{output_index}: {samples} steps{detail}")
+                print(f"{source_key} -> demo_{accepted - 1}: {samples} steps{detail}")
 
             data.attrs["total"] = total
-            data.attrs["num_demos"] = len(keys)
+            data.attrs["num_demos"] = accepted
+            data.attrs["rejected_demos"] = rejected
             output_file.flush()
         os.replace(temporary_path, output_path)
     except BaseException:
@@ -620,7 +932,8 @@ def convert(args: argparse.Namespace) -> None:
     finally:
         env.close()
 
-    print(f"Wrote {len(keys)} demos / {total} samples to {output_path}")
+    label = "diagnostic demos" if args.keep_failures else "successful demos"
+    print(f"Wrote {accepted} {label} / {total} samples to {output_path} ({rejected} rejected)")
     if mapping.fidelity != "procedural_port":
         print(f"WARNING: {task_id} uses {mapping.env_name} with fidelity={mapping.fidelity}")
 
@@ -635,9 +948,35 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--control-freq", type=int, default=20)
     parser.add_argument(
         "--conversion-mode",
-        choices=("state-map", "replay"),
+        choices=("state-map", "replay", "closed-loop", "joint-closed-loop"),
         default="state-map",
-        help="Map every recorded state (default), or test open-loop MuJoCo replay",
+        help="Map recorded states, test open-loop replay, or track TCP poses closed-loop",
+    )
+    parser.add_argument(
+        "--corrections-per-target", type=int, default=1,
+        help="Maximum feedback steps used to converge to each reference TCP pose",
+    )
+    parser.add_argument(
+        "--terminal-corrections", type=int, default=20,
+        help="Extra feedback steps toward the final TCP pose in closed-loop mode",
+    )
+    parser.add_argument("--position-tolerance", type=float, default=0.005)
+    parser.add_argument("--orientation-tolerance", type=float, default=0.05)
+    parser.add_argument("--tracking-gain", type=float, default=1.0)
+    parser.add_argument("--pregrasp-corrections", type=int, default=1)
+    parser.add_argument("--gripper-transition-steps", type=int, default=1)
+    parser.add_argument("--max-joint-step", type=float, default=0.05)
+    parser.add_argument("--joint-tolerance", type=float, default=0.01)
+    parser.add_argument("--joint-corrections", type=int, default=1)
+    parser.add_argument("--joint-kp", type=float, default=500.0)
+    parser.add_argument("--joint-damping-ratio", type=float, default=1.58113883)
+    parser.add_argument("--surface-friction", type=float, default=0.5)
+    parser.add_argument("--finger-friction", type=float, default=2.0)
+    parser.add_argument("--contact-timeconstant", type=float, default=0.002)
+    parser.add_argument("--gripper-force-limit", type=float, default=100.0)
+    parser.add_argument(
+        "--keep-failures", action="store_true",
+        help="Diagnostic only: write failed rollouts instead of filtering them",
     )
     parser.add_argument(
         "--no-invert-gripper",
@@ -656,6 +995,20 @@ def main() -> int:
     args = parse_args()
     if args.count is not None and args.count <= 0:
         raise ValueError("--count must be positive")
+    if args.corrections_per_target <= 0 or args.terminal_corrections < 0:
+        raise ValueError("correction counts must be positive / non-negative")
+    if args.position_tolerance <= 0 or args.orientation_tolerance <= 0 or args.tracking_gain <= 0:
+        raise ValueError("tracking tolerances must be positive")
+    if args.pregrasp_corrections <= 0 or args.gripper_transition_steps <= 0:
+        raise ValueError("gripper synchronization step counts must be positive")
+    if args.max_joint_step <= 0 or args.joint_tolerance <= 0 or args.joint_corrections <= 0:
+        raise ValueError("joint tracking parameters must be positive")
+    if args.joint_kp <= 0 or args.joint_damping_ratio <= 0:
+        raise ValueError("joint controller gains must be positive")
+    if args.surface_friction <= 0 or args.finger_friction <= 0 or args.contact_timeconstant <= 0:
+        raise ValueError("contact parameters must be positive")
+    if args.gripper_force_limit <= 0:
+        raise ValueError("gripper force limit must be positive")
     convert(args)
     return 0
 
