@@ -270,6 +270,26 @@ def set_mapped_state(
             start = velocity_address[0] if isinstance(velocity_address, tuple) else velocity_address
             env.sim.data.qvel[start : start + 6] = state[7:13]
     env.sim.forward()
+    synchronize_gripper_command_state(env)
+
+
+def synchronize_gripper_command_state(env) -> None:
+    """Align robosuite's hidden gripper command state after a state install.
+
+    PandaGripper integrates binary open / close commands in normalized actuator
+    space. Teleporting finger qpos without updating ``current_action`` makes the
+    next command start from a stale target, unlike ManiSkill's absolute gripper
+    position controller.
+    """
+    robot = env.robots[0]
+    actuator_ids = robot._ref_joint_gripper_actuator_indexes
+    qpos = np.asarray(
+        env.sim.data.qpos[robot._ref_gripper_joint_pos_indexes], dtype=np.float64
+    )
+    control_range = np.asarray(env.sim.model.actuator_ctrlrange[actuator_ids])
+    midpoint = 0.5 * (control_range[:, 0] + control_range[:, 1])
+    half_range = 0.5 * (control_range[:, 1] - control_range[:, 0])
+    robot.gripper.current_action = np.clip((qpos - midpoint) / half_range, -1.0, 1.0)
 
 
 def scaled_joint_action(controller, target_qpos: np.ndarray, current_qpos: np.ndarray) -> np.ndarray:
@@ -515,9 +535,6 @@ def closed_loop_trajectory(
     targets = list(range(1, len(articulation)))
     previous_source_gripper = float(source_actions[0, 7]) if source_actions.shape[1] > 7 else 1.0
     for target_index in targets:
-        # Resolve the redundant Panda posture toward the source configuration.
-        # The externally executed command remains the evaluation OSC action.
-        robot.controller.update_initial_joints(articulation[target_index, 13:20])
         source_index = min(target_index - 1, len(source_actions) - 1)
         source_gripper = float(source_actions[source_index, 7]) if source_actions.shape[1] > 7 else 1.0
         gripper = -source_gripper if invert_gripper else source_gripper
@@ -676,6 +693,200 @@ def joint_closed_loop_trajectory(
     }
 
 
+def quaternion_distance_wxyz(a: np.ndarray, b: np.ndarray) -> float:
+    """Unsigned angular distance between two wxyz quaternions."""
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    a /= np.linalg.norm(a)
+    b /= np.linalg.norm(b)
+    return float(2.0 * np.arccos(np.clip(abs(np.dot(a, b)), 0.0, 1.0)))
+
+
+def snapshot_rollout_state(env) -> dict[str, Any]:
+    """Capture simulator and hidden controller state for MPC branching."""
+    robot = env.robots[0]
+    return {
+        "sim": np.asarray(env.sim.get_state().flatten(), dtype=np.float64),
+        "ctrl": np.asarray(env.sim.data.ctrl, dtype=np.float64).copy(),
+        "goal_qpos": None
+        if robot.controller.goal_qpos is None
+        else np.asarray(robot.controller.goal_qpos, dtype=np.float64).copy(),
+        "gripper_action": np.asarray(robot.gripper.current_action, dtype=np.float64).copy(),
+        "cur_time": float(env.cur_time),
+        "timestep": int(env.timestep),
+    }
+
+
+def restore_rollout_state(env, state: dict[str, Any]) -> None:
+    """Restore a branch without leaking candidate controller state."""
+    robot = env.robots[0]
+    env.sim.set_state_from_flattened(state["sim"])
+    env.sim.data.ctrl[:] = state["ctrl"]
+    env.sim.forward()
+    robot.controller.goal_qpos = (
+        None if state["goal_qpos"] is None else state["goal_qpos"].copy()
+    )
+    robot.controller.new_update = True
+    robot.gripper.current_action = state["gripper_action"].copy()
+    env.cur_time = state["cur_time"]
+    env.timestep = state["timestep"]
+
+
+def mpc_tracking_cost(
+    env,
+    articulation: np.ndarray,
+    actors: dict[str, np.ndarray],
+    mapping: TaskMapping,
+    source_index: int,
+) -> float:
+    """Shared dimensionless robot and object tracking cost."""
+    robot = env.robots[0]
+    target_state = articulation[source_index + 1]
+    joint_error = np.asarray(robot._joint_positions) - target_state[13:20]
+    velocity_error = np.asarray(robot._joint_velocities) - target_state[22:29]
+    cost = float(np.mean((joint_error / 0.02) ** 2))
+    cost += 0.05 * float(np.mean((velocity_error / 0.5) ** 2))
+    for source_name, target_name in mapping.object_map:
+        if target_name not in env.dynamic_object_names or source_name not in actors:
+            continue
+        actual = np.asarray(env.get_task_object_pose(target_name), dtype=np.float64)
+        desired = np.asarray(actors[source_name][source_index + 1, :7], dtype=np.float64).copy()
+        desired[:3] += np.asarray(env.source_world_offset, dtype=np.float64)
+        cost += float((np.linalg.norm(actual[:3] - desired[:3]) / 0.01) ** 2)
+        cost += float((quaternion_distance_wxyz(actual[3:7], desired[3:7]) / 0.1) ** 2)
+    if env._check_success():
+        cost -= 1000.0
+    return cost
+
+
+def mpc_joint_closed_loop_trajectory(
+    env,
+    source: h5py.Group,
+    mapping: TaskMapping,
+    invert_gripper: bool,
+    terminal_corrections: int,
+    surface_friction: float,
+    finger_friction: float,
+    contact_timeconstant: float,
+    gripper_force_limit: float,
+    mpc_samples: int,
+    mpc_horizon: int,
+    mpc_noise: float,
+    mpc_seed: int,
+) -> dict[str, Any]:
+    """Retarget a source trajectory using receding-horizon command sampling."""
+    source_actions = np.asarray(source["actions"], dtype=np.float32)
+    articulation = source_articulation_states(source)
+    actors = source_actor_states(source)
+    env.reset()
+    configure_contact_physics(
+        env, surface_friction, finger_friction, contact_timeconstant, gripper_force_limit
+    )
+    set_mapped_state(
+        env, articulation[0], {name: value[0] for name, value in actors.items()},
+        mapping.object_map,
+    )
+    robot = env.robots[0]
+    robot.controller.reset_goal()
+    wrapper = ManiSkillWrapper(env)
+    rng = np.random.default_rng(mpc_seed)
+    current_obs = env._get_observations(force_update=True)
+    states, observations, next_observations, commands = [], [], [], []
+    rewards, dones, tracking_errors = [], [], []
+
+    for index in range(len(source_actions)):
+        branch = snapshot_rollout_state(env)
+        best_cost = np.inf
+        best_command = None
+        residuals = np.zeros((mpc_samples, mpc_horizon, 7), dtype=np.float64)
+        pair_count = (mpc_samples - 1) // 2
+        if pair_count:
+            noise = rng.normal(0.0, mpc_noise, size=(pair_count, mpc_horizon, 7))
+            residuals[1 : 1 + pair_count] = noise
+            residuals[1 + pair_count : 1 + 2 * pair_count] = -noise
+        if 1 + 2 * pair_count < mpc_samples:
+            residuals[-1] = rng.normal(0.0, mpc_noise, size=(mpc_horizon, 7))
+
+        for candidate in range(mpc_samples):
+            restore_rollout_state(env, branch)
+            candidate_cost = 0.0
+            first_command = None
+            for horizon_step in range(mpc_horizon):
+                future = min(index + horizon_step, len(source_actions) - 1)
+                current = np.asarray(robot._joint_positions, dtype=np.float64)
+                nominal = scaled_joint_action(
+                    robot.controller, source_actions[future, :7], current
+                )
+                arm = np.clip(nominal + residuals[candidate, horizon_step], -1.0, 1.0)
+                source_gripper = float(source_actions[future, 7])
+                gripper = -source_gripper if invert_gripper else source_gripper
+                command = np.r_[arm, np.clip(gripper, -1.0, 1.0)].astype(np.float32)
+                if first_command is None:
+                    first_command = command.copy()
+                wrapper.step(command)
+                if not (
+                    np.all(np.isfinite(env.sim.data.qpos))
+                    and np.all(np.isfinite(env.sim.data.qvel))
+                    and np.all(np.isfinite(env.sim.data.qacc))
+                ):
+                    candidate_cost = np.inf
+                    break
+                candidate_cost += mpc_tracking_cost(
+                    env, articulation, actors, mapping, future
+                )
+                candidate_cost += 0.02 * float(np.mean(residuals[candidate, horizon_step] ** 2))
+                if wrapper.check_success():
+                    break
+            if best_command is None or candidate_cost < best_cost:
+                best_cost = candidate_cost
+                best_command = first_command
+
+        restore_rollout_state(env, branch)
+        states.append(np.asarray(wrapper.sim.get_state().flatten(), dtype=np.float64))
+        observations.append(numeric_observation(current_obs, env))
+        next_obs, reward, done, _ = wrapper.step(best_command)
+        next_observations.append(numeric_observation(next_obs, env))
+        commands.append(best_command)
+        rewards.append(float(reward))
+        dones.append(bool(done))
+        error = source_actions[index, :7] - np.asarray(robot._joint_positions)
+        tracking_errors.append(error.astype(np.float32))
+        current_obs = next_obs
+        if wrapper.check_success():
+            break
+
+    if not wrapper.check_success():
+        source_gripper = float(source_actions[-1, 7])
+        gripper = -source_gripper if invert_gripper else source_gripper
+        for _ in range(terminal_corrections):
+            current = np.asarray(robot._joint_positions, dtype=np.float64)
+            arm = scaled_joint_action(robot.controller, source_actions[-1, :7], current)
+            command = np.r_[arm, np.clip(gripper, -1.0, 1.0)].astype(np.float32)
+            states.append(np.asarray(wrapper.sim.get_state().flatten(), dtype=np.float64))
+            observations.append(numeric_observation(current_obs, env))
+            next_obs, reward, done, _ = wrapper.step(command)
+            next_observations.append(numeric_observation(next_obs, env))
+            commands.append(command)
+            rewards.append(float(reward))
+            dones.append(bool(done))
+            tracking_errors.append(
+                (source_actions[-1, :7] - np.asarray(robot._joint_positions)).astype(np.float32)
+            )
+            current_obs = next_obs
+            if wrapper.check_success():
+                break
+
+    return {
+        "states": np.asarray(states), "actions": np.asarray(commands, dtype=np.float32),
+        "source_actions": source_actions, "rewards": np.asarray(rewards, dtype=np.float32),
+        "dones": np.asarray(dones, dtype=np.bool_),
+        "tracking_error": np.asarray(tracking_errors, dtype=np.float32),
+        "obs": observations, "next_obs": next_observations,
+        "copied_objects": sum(name in actors for name, _ in mapping.object_map),
+        "success": wrapper.check_success(),
+    }
+
+
 def map_trajectory_states(
     env,
     source: h5py.Group,
@@ -773,9 +984,10 @@ def convert(args: argparse.Namespace) -> None:
 
     metadata = source_episode_metadata(input_path.with_suffix(".json"))
     controller = "OSC_POSE" if args.conversion_mode == "closed-loop" else "JOINT_POSITION"
-    joint_kp = args.joint_kp if args.conversion_mode == "joint-closed-loop" else None
+    joint_modes = ("joint-closed-loop", "mpc-joint-closed-loop")
+    joint_kp = args.joint_kp if args.conversion_mode in joint_modes else None
     joint_damping = (
-        args.joint_damping_ratio if args.conversion_mode == "joint-closed-loop" else None
+        args.joint_damping_ratio if args.conversion_mode in joint_modes else None
     )
     env = make_environment(
         mapping.env_name, args.control_freq, controller=controller,
@@ -812,8 +1024,15 @@ def convert(args: argparse.Namespace) -> None:
                 "replay": "open_loop_mujoco_replay",
                 "closed-loop": "closed_loop_tcp_tracking_in_mujoco",
                 "joint-closed-loop": "interpolated_closed_loop_joint_tracking_in_mujoco",
+                "mpc-joint-closed-loop": "receding_horizon_joint_and_object_tracking_in_mujoco",
             }[args.conversion_mode]
             data.attrs["controller"] = controller
+            if args.conversion_mode == "mpc-joint-closed-loop":
+                data.attrs["mpc_samples"] = args.mpc_samples
+                data.attrs["mpc_horizon"] = args.mpc_horizon
+                data.attrs["mpc_noise"] = args.mpc_noise
+                data.attrs["mpc_seed"] = args.mpc_seed
+                data.attrs["mpc_restarts"] = args.mpc_restarts
 
             keys = sorted(
                 (key for key in source_file if key.startswith("traj_")),
@@ -858,7 +1077,7 @@ def convert(args: argparse.Namespace) -> None:
                         pregrasp_corrections=args.pregrasp_corrections,
                         gripper_transition_steps=args.gripper_transition_steps,
                     )
-                else:
+                elif args.conversion_mode == "joint-closed-loop":
                     result = joint_closed_loop_trajectory(
                         env, source_file[source_key], mapping,
                         invert_gripper=not args.no_invert_gripper,
@@ -871,8 +1090,26 @@ def convert(args: argparse.Namespace) -> None:
                         contact_timeconstant=args.contact_timeconstant,
                         gripper_force_limit=args.gripper_force_limit,
                     )
+                else:
+                    for restart in range(args.mpc_restarts):
+                        result = mpc_joint_closed_loop_trajectory(
+                            env, source_file[source_key], mapping,
+                            invert_gripper=not args.no_invert_gripper,
+                            terminal_corrections=args.terminal_corrections,
+                            surface_friction=args.surface_friction,
+                            finger_friction=args.finger_friction,
+                            contact_timeconstant=args.contact_timeconstant,
+                            gripper_force_limit=args.gripper_force_limit,
+                            mpc_samples=args.mpc_samples,
+                            mpc_horizon=args.mpc_horizon,
+                            mpc_noise=args.mpc_noise,
+                            mpc_seed=args.mpc_seed + episode_id + 1_000_003 * restart,
+                        )
+                        if result["success"]:
+                            break
+                    result["mpc_attempt"] = restart
                 rollout_failed = (
-                    args.conversion_mode in ("closed-loop", "joint-closed-loop")
+                    args.conversion_mode in ("closed-loop", *joint_modes)
                     and not result["success"]
                 )
                 if rollout_failed:
@@ -887,7 +1124,7 @@ def convert(args: argparse.Namespace) -> None:
                         continue
                 demo = data.create_group(f"demo_{accepted}")
                 result["mujoco_joint_actions"] = result["actions"]
-                if args.conversion_mode not in ("closed-loop", "joint-closed-loop"):
+                if args.conversion_mode not in ("closed-loop", *joint_modes):
                     result["actions"] = libero_actions(result)
                 robot_states = np.stack(
                     [np.concatenate((obs["joint_states"], obs["gripper_states"])) for obs in result["obs"]]
@@ -908,6 +1145,8 @@ def convert(args: argparse.Namespace) -> None:
                 )
                 demo.attrs["copied_source_object_poses"] = result["copied_objects"]
                 demo.attrs["successful"] = not rollout_failed
+                if "mpc_attempt" in result:
+                    demo.attrs["mpc_attempt"] = result["mpc_attempt"]
                 try:
                     demo.attrs["model_file"] = env.model.get_xml()
                 except AttributeError:
@@ -919,6 +1158,8 @@ def convert(args: argparse.Namespace) -> None:
                 else:
                     detail = ""
                 print(f"{source_key} -> demo_{accepted - 1}: {samples} steps{detail}")
+                if args.target_successes is not None and accepted >= args.target_successes:
+                    break
 
             data.attrs["total"] = total
             data.attrs["num_demos"] = accepted
@@ -945,10 +1186,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--task-id", help="Override task inferred from the input path")
     parser.add_argument("--env-name", help="Override the mapped robosuite environment")
     parser.add_argument("--count", type=int, help="Only convert the first N trajectories")
+    parser.add_argument(
+        "--target-successes", type=int,
+        help="Stop scanning source trajectories after retaining this many successes",
+    )
     parser.add_argument("--control-freq", type=int, default=20)
     parser.add_argument(
         "--conversion-mode",
-        choices=("state-map", "replay", "closed-loop", "joint-closed-loop"),
+        choices=(
+            "state-map", "replay", "closed-loop", "joint-closed-loop",
+            "mpc-joint-closed-loop",
+        ),
         default="state-map",
         help="Map recorded states, test open-loop replay, or track TCP poses closed-loop",
     )
@@ -970,6 +1218,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--joint-corrections", type=int, default=1)
     parser.add_argument("--joint-kp", type=float, default=500.0)
     parser.add_argument("--joint-damping-ratio", type=float, default=1.58113883)
+    parser.add_argument("--mpc-samples", type=int, default=9)
+    parser.add_argument("--mpc-horizon", type=int, default=3)
+    parser.add_argument("--mpc-noise", type=float, default=0.08)
+    parser.add_argument("--mpc-seed", type=int, default=0)
+    parser.add_argument(
+        "--mpc-restarts", type=int, default=1,
+        help="Independent deterministic MPC attempts per source trajectory",
+    )
     parser.add_argument("--surface-friction", type=float, default=0.5)
     parser.add_argument("--finger-friction", type=float, default=2.0)
     parser.add_argument("--contact-timeconstant", type=float, default=0.002)
@@ -995,6 +1251,8 @@ def main() -> int:
     args = parse_args()
     if args.count is not None and args.count <= 0:
         raise ValueError("--count must be positive")
+    if args.target_successes is not None and args.target_successes <= 0:
+        raise ValueError("--target-successes must be positive")
     if args.corrections_per_target <= 0 or args.terminal_corrections < 0:
         raise ValueError("correction counts must be positive / non-negative")
     if args.position_tolerance <= 0 or args.orientation_tolerance <= 0 or args.tracking_gain <= 0:
@@ -1005,6 +1263,11 @@ def main() -> int:
         raise ValueError("joint tracking parameters must be positive")
     if args.joint_kp <= 0 or args.joint_damping_ratio <= 0:
         raise ValueError("joint controller gains must be positive")
+    if (
+        args.mpc_samples <= 0 or args.mpc_horizon <= 0 or args.mpc_noise <= 0
+        or args.mpc_restarts <= 0
+    ):
+        raise ValueError("MPC sampling parameters must be positive")
     if args.surface_friction <= 0 or args.finger_friction <= 0 or args.contact_timeconstant <= 0:
         raise ValueError("contact parameters must be positive")
     if args.gripper_force_limit <= 0:

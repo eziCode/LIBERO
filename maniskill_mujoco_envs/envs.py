@@ -436,6 +436,7 @@ class ManiSkillMujocoPegInsertionSide(ManiSkillMujocoBase):
     maniskill_task_id = "PegInsertionSide-v1"
     environment_label = "ManiSkill PegInsertionSide-v1 MuJoCo Port"
     clearance = 0.003
+    insertion_depth_threshold = -0.020
 
     def __init__(self, geometry_seed=0, peg_half_length=None, peg_radius=None, **kwargs):
         self.geometry_seed = int(geometry_seed)
@@ -515,7 +516,7 @@ class ManiSkillMujocoPegInsertionSide(ManiSkillMujocoBase):
     def _check_success(self):
         relative = self.peg_head_at_hole()
         return (
-            relative[0] >= -0.015
+            relative[0] >= self.insertion_depth_threshold
             and abs(relative[1]) <= self.hole_radius
             and abs(relative[2]) <= self.hole_radius
         )

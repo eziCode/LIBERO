@@ -184,7 +184,7 @@ def main() -> None:
     parser.add_argument(
         "--output-dir", type=Path, default=Path("artifacts/trajectory_videos")
     )
-    parser.add_argument("--demo", default="demo_0")
+    parser.add_argument("--demo", default="demo_0", help="Demo name or 'all'")
     parser.add_argument("--task", help="Render only this task stem, e.g. PickCube-v1")
     parser.add_argument("--size", type=int, default=512)
     parser.add_argument("--fps", type=int, default=20)
@@ -202,20 +202,32 @@ def main() -> None:
     if not paths:
         raise FileNotFoundError(f"no HDF5 datasets found in {args.input_dir}")
     for path in paths:
-        render_dataset(
-            path,
-            args.output_dir
-            / (
-                f"{path.stem}_{args.demo}"
-                f"{'_' + args.camera if args.camera != 'agentview' else ''}"
-                f"{'_force_tactile' if args.overlay_force else ''}.mp4"
-            ),
-            args.demo,
-            args.size,
-            args.fps,
-            args.camera,
-            args.overlay_force,
-        )
+        with h5py.File(path, "r") as dataset:
+            data = dataset["data"]
+            demo_names = (
+                sorted(data, key=lambda name: int(name.rsplit("_", 1)[1]))
+                if args.demo == "all"
+                else [args.demo]
+            )
+            statuses = {
+                name: "success" if bool(data[name].attrs.get("successful", True)) else "failure"
+                for name in demo_names
+            }
+        for demo_name in demo_names:
+            render_dataset(
+                path,
+                args.output_dir
+                / (
+                    f"{path.stem}_{demo_name}_{statuses[demo_name]}"
+                    f"{'_' + args.camera if args.camera != 'agentview' else ''}"
+                    f"{'_force_tactile' if args.overlay_force else ''}.mp4"
+                ),
+                demo_name,
+                args.size,
+                args.fps,
+                args.camera,
+                args.overlay_force,
+            )
 
 
 if __name__ == "__main__":
